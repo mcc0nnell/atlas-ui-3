@@ -1,0 +1,35 @@
+{
+  "schema": "atlas-pr1175-visual-evidence/v1",
+  "source_commit": "5a711cf99dbb2f3bc18c42ea9f3017a058f96f8f",
+  "capture": "Offline Chromium / real bundled Atlas components / synthetic browser state",
+  "scenarios": [
+    {
+      "filename": "01-restricted-gallery.png",
+      "bytes": 89060,
+      "sha256": "9f8c2ef9f9d252f8d16978a279a80e655c4f2221393027bfc12b6aba0dc6c815"
+    },
+    {
+      "filename": "02-revoked-theme-fallback.png",
+      "bytes": 83386,
+      "sha256": "13177abb85c0e759d9d040cb5f26a00aebb03ca71a5d7d41367d1efd57e43176"
+    }
+  ],
+  "assertions": {
+    "restricted_radios": [
+      "dark",
+      "light",
+      "windows-xp-luna"
+    ],
+    "revoked_radios": [
+      "dark",
+      "light"
+    ],
+    "revoked_saved": "windows-xp-luna",
+    "revoked_rendered": "light",
+    "browser_script_errors": 0
+  },
+  "limitations": [
+    "isolated fixture, not production deployment",
+    "human review pending"
+  ]
+}
