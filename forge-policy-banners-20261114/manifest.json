@@ -1,0 +1,49 @@
+{
+  "protocol": "atlas-pr1175-local-evidence/v1",
+  "baseline": "7d187d051621aee881eda7339fd7bdadeb4e08d0",
+  "purpose": "Real browser screenshots of synthetic CUI marking on actual Atlas shell components",
+  "mechanism": "Chromium headless via offline network-disabled Docker, actual built Atlas stylesheets, real ComplianceBanner and real Header/RetroControls",
+  "screenshots": [
+    {
+      "filename": "dark-proof.png",
+      "sha256": "553f6a4c157de267a7d00f58a84aa40927c2598862cc160669225f3648d81f74",
+      "bytes": 67622
+    },
+    {
+      "filename": "dos-cga-proof.png",
+      "sha256": "09099a80ba89214315f6d4917690c9037ad2156ab92e8dee9940895dc91e0b11",
+      "bytes": 62269
+    },
+    {
+      "filename": "maximalist-banners-proof.png",
+      "sha256": "a1159ba5e8fce9ef5537e3f79afe56c7b2c1dab5c0088fe1e5d7380b61970650",
+      "bytes": 64057
+    },
+    {
+      "filename": "vaporwave-proof.png",
+      "sha256": "b29cad51d3d8974cfde69441cadbe783dfe0f8b6d82e03e069d621c8c4718713",
+      "bytes": 102281
+    },
+    {
+      "filename": "windows-xp-luna-proof.png",
+      "sha256": "e90b689ddd4174b1f2737aa176821eb11ac08a5a7515c7c7258a3fb63d79e657",
+      "bytes": 97278
+    }
+  ],
+  "contrast_report": {
+    "filename": "contrast-55-with-banner.json",
+    "sha256": "e00e71472f42f46b89220dfc1e0c375a0f1668401654b06f9b2ed30bb20810e1",
+    "expected": 55,
+    "passed": 55,
+    "measured_pairs": 98609,
+    "failed_measured_pairs": 0,
+    "unmeasurable_gradient_cases": 909,
+    "regions": 39
+  },
+  "limitations": [
+    "local browser checks, not production clearance",
+    "unmeasurable gradient cases not claimed WCAG pass",
+    "sample CUI data only",
+    "human review pending"
+  ]
+}
