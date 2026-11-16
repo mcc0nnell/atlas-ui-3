@@ -10,9 +10,6 @@ name: Release - weekly automated
 # Full runbook: docs/developer/release-process.md
 
 on:
-  schedule:
-    # Mondays at 14:00 UTC.
-    - cron: '0 14 * * 1'
   workflow_dispatch:
     inputs:
       version:
