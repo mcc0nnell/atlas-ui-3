@@ -1,12 +1,17 @@
 """Opt-in room API: authenticated owner, immutable events, cursor pagination."""
 
+import asyncio
+import logging
 from typing import Annotated, Literal, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StringConstraints
+from starlette.concurrency import run_in_threadpool
 
 from atlas.core.log_sanitizer import get_current_user
-from atlas.modules.chat_history.room_repository import RoomNotFound, TransactionConflict
+from atlas.modules.chat_history.room_repository import AgentNotFound, RoomBusy, RoomNotFound, TransactionConflict
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -78,3 +83,43 @@ def append_event(room_id: RoomId, body: AppendEvent, user: str = Depends(get_cur
         raise HTTPException(404, "Room not found") from exc
     except TransactionConflict as exc:
         raise HTTPException(409, "Transaction identifier already used") from exc
+
+
+class AgentTurn(ClosedModel):
+    transaction_id: TransactionId
+    agent_id: Name
+    model: Name
+    prompt: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+
+
+@router.post("/{room_id}/turns")
+async def agent_turn(room_id: RoomId, body: AgentTurn, user: str = Depends(get_current_user),
+                     repo=Depends(_repo)):
+    from atlas.application.chat.runs.launcher import LaunchRefused, resolve_model
+    from atlas.application.chat.runs.room_turns import run_room_turn
+    from atlas.infrastructure.app_factory import app_factory
+
+    try:
+        await resolve_model(app_factory.get_config_manager(), body.model, user)
+        turn, context = await run_in_threadpool(
+            repo.reserve_turn, user, room_id, body.transaction_id,
+            body.agent_id, body.model, body.prompt,
+        )
+    except (RoomNotFound, AgentNotFound) as exc:
+        raise HTTPException(404, "Room or roster entry not found") from exc
+    except (RoomBusy, TransactionConflict) as exc:
+        raise HTTPException(409, "Room busy or transaction conflict") from exc
+    except LaunchRefused as exc:
+        raise HTTPException(403, "Model unavailable") from exc
+    if context is None:
+        return turn
+    reply = None
+    try:
+        reply = await asyncio.wait_for(run_room_turn(app_factory, user, turn, context, body.prompt), timeout=100)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Room turn failed", exc_info=False)
+    finally:
+        finished = await run_in_threadpool(repo.finish_turn, user, room_id, body.transaction_id, reply)
+    return finished

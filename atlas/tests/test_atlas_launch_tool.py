@@ -2376,3 +2376,28 @@ async def test_concurrent_follow_ups_to_one_child_admit_exactly_one():
     assert len(live) == 1
     for service in factory.services:
         service.release.set()
+
+
+async def test_room_turn_uses_native_text_only_launcher():
+    from atlas.application.chat.runs.room_turns import run_room_turn
+
+    class TextService(_ChatService):
+        def __init__(self, connection):
+            super().__init__(connection)
+            self.session_repository = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
+                history=SimpleNamespace(messages=[SimpleNamespace(
+                    role=SimpleNamespace(value="assistant"), content="Room reply", metadata={})])
+            )))
+            self.release.set()
+
+    factory = _Factory(TextService)
+    result = await run_room_turn(factory, "user@example.com", {
+        "agent_id": "Reviewer", "model": "gpt-4o", "conversation_id": "room-test-conversation"
+    }, "[]", "Review the design")
+    assert result == "Room reply"
+    call = factory.services[0].calls[0]
+    assert call["selected_tools"] == []
+    assert call["selected_data_sources"] == []
+    assert call["agent_mode"] is False
+    assert call["conversation_id"] == "room-test-conversation"
+    assert factory.services[0].agent_mode.agent_loop_factory.skip_approval is False

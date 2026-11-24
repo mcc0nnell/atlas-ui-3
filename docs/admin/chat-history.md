@@ -460,6 +460,26 @@ Use `room.agent.added` or `room.agent.removed` with an `agent_id` to record
 roster changes. These are descriptive events, not invitations or execution
 permissions. Retrying the same transaction and payload returns the same event;
 reusing a transaction ID for different content returns HTTP 409. Room IDs are
-scoped to the authenticated owner. The experimental Rooms page supports creation, manual timeline refresh, message submission and roster editing. Rooms are disabled in compliance-enabled deployments until room classification support exists. This initial API has no automated agent
-execution, shared human membership, federation, or room deletion. Do not treat
+scoped to the authenticated owner. The experimental Rooms page supports creation, manual timeline refresh, message submission, roster editing and explicitly requested text-only model turns. Rooms are disabled in compliance-enabled deployments until room classification support exists. This initial API has no autonomous agent execution, shared human membership, federation, or room deletion. Do not treat
 roster records as authenticated agent messages.
+
+
+#### Room agent turns
+
+A room owner can select a roster entry and an authorized model and explicitly
+request a single text response. The API is `POST /api/rooms/{room_id}/turns`,
+with `transaction_id`, `agent_id`, `model`, and `prompt`. It invokes the
+native Atlas launcher in a text-only mode (no tools, data sources, or agent
+loop). The user must initiate each turn. The model receives bounded recent
+room context, including prior participants' replies. Each turn has its own
+native conversation; long-lived per-agent native conversation continuation is
+not part of this increment.
+
+A PostgreSQL reservation prevents overlapping room turns and repeated model
+invocations with the same transaction ID. Successful responses become
+server-authored `room.agent.reply` events. A timed-out or failed turn is not
+automatically retried. After three minutes a later explicit request can mark
+an abandoned reservation failed; a late reply cannot change that status or
+append a room event. The fork's native run registry remains replica-local;
+this room-specific reservation is not a substitute for upstream run
+coordination. No live push messaging or autonomous agent scheduling is added.

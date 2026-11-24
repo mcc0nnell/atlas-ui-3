@@ -616,6 +616,7 @@ async def _run_child(
     user_email: str,
     compliance_level: Any,
     registry: Any,
+    text_only: bool = False,
 ) -> None:
     """The child run's task body: bind identity, chat, record the outcome."""
     set_current_run(record.run_id, record.conversation_id)
@@ -629,7 +630,7 @@ async def _run_child(
             selected_tools=tools,
             selected_data_sources=data_sources,
             user_email=user_email,
-            agent_mode=True,
+            agent_mode=not text_only,
             agent_max_steps=LAUNCH_AGENT_MAX_STEPS,
             update_callback=chat_service.connection.send_json,
             conversation_id=record.conversation_id,
@@ -803,6 +804,7 @@ async def _start_child_run(
     source: str = "atlas_launch",
     actor: Optional[str] = None,
     compliance_level: Any = _FROM_CONTEXT,
+    text_only: bool = False,
 ) -> Tuple[Any, Dict[str, Any], List[str]]:
     """Admit a child run on ``conversation_id`` and schedule its task.
 
@@ -838,12 +840,17 @@ async def _start_child_run(
         (context or {}).get("update_callback"), "pending", conversation_id
     )
     chat_service = factory.create_chat_service(connection=connection)
-    tools = await resolve_child_tools(
-        chat_service,
-        {"selected_tools": selected_tools},
-        user_email,
-        no_tools_message=no_tools_message,
-    )
+    if text_only:
+        if selected_tools or data_sources:
+            raise LaunchRefused("Text-only runs cannot select tools or data sources.")
+        tools = []
+    else:
+        tools = await resolve_child_tools(
+            chat_service,
+            {"selected_tools": selected_tools},
+            user_email,
+            no_tools_message=no_tools_message,
+        )
     # Who answers the child's tool approvals? Nobody, unless somebody is
     # looking at the child's conversation -- and it is not in the user's
     # history until its first save, so a launched run would pause on its first
@@ -861,12 +868,12 @@ async def _start_child_run(
             "approves them in the conversation.",
             code="approval_required",
         )
-    if not admin_gated and not _preapprove_child_tools(chat_service):
+    if not text_only and not admin_gated and not _preapprove_child_tools(chat_service):
         logger.warning("Could not pre-approve tools for launched run")
     if compliance_level is _FROM_CONTEXT:
         compliance_level = (context or {}).get("compliance_level")
     requested_sources = list(data_sources)
-    data_sources = await resolve_child_data_sources(
+    data_sources = [] if text_only else await resolve_child_data_sources(
         factory,
         requested_sources,
         user_email,
@@ -932,6 +939,7 @@ async def _start_child_run(
             user_email=user_email,
             compliance_level=compliance_level,
             registry=registry,
+            text_only=text_only,
         )
     )
     registry.attach_task(record.run_id, task)

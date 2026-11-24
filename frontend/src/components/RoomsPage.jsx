@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { useChat } from '../contexts/ChatContext'
 
 const button = 'px-3 py-2 rounded border border-gray-600 hover:bg-gray-700 disabled:opacity-50'
 const input = 'w-full min-w-0 rounded bg-gray-800 border border-gray-600 p-2 text-gray-100'
@@ -18,7 +19,7 @@ function post(path, payload) {
   })
 }
 
-function RoomTimeline({ room }) {
+function RoomTimeline({ room, models }) {
   const path = `/api/rooms/${encodeURIComponent(room.id)}/events`
   const [events, setEvents] = useState([])
   const cursor = useRef(0)
@@ -29,6 +30,12 @@ function RoomTimeline({ room }) {
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [agent, setAgent] = useState('')
+  const [participant, setParticipant] = useState('')
+  const [model, setModel] = useState('')
+  const [question, setQuestion] = useState('')
+  const [turnPending, setTurnPending] = useState(null)
+  const [turnBusy, setTurnBusy] = useState(false)
+  const turnLock = useRef(false)
   const [pending, setPending] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -72,6 +79,31 @@ function RoomTimeline({ room }) {
     }
   }
 
+  const ask = async () => {
+    if (turnLock.current || loading.current) return
+    turnLock.current = true
+    setTurnBusy(true)
+    setError('')
+    const payload = turnPending || {
+      transaction_id: crypto.randomUUID(), agent_id: participant, model, prompt: question.trim(),
+    }
+    setTurnPending(payload)
+    try {
+      const result = await post(`/api/rooms/${encodeURIComponent(room.id)}/turns`, payload)
+      if (result.state !== 'pending') {
+        setTurnPending(null)
+        setQuestion('')
+        if (result.state === 'failed') setError('Agent turn failed. No reply was saved.')
+      }
+      await sync()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      turnLock.current = false
+      setTurnBusy(false)
+    }
+  }
+
   const roster = new Set()
   for (const event of events) {
     if (event.type === 'room.agent.added') roster.add(event.content.agent_id)
@@ -93,8 +125,9 @@ function RoomTimeline({ room }) {
           <ol aria-label="Messages" className="space-y-3 min-h-24">
             {events.map(event => (
               <li key={event.sequence} className="border border-gray-700 rounded p-3 break-words">
-                <div className="text-xs text-gray-400">{event.sender} · #{event.sequence}</div>
-                <p className="whitespace-pre-wrap">{event.type === 'room.message'
+                <div className="text-xs text-gray-400">{event.type === 'room.agent.reply'
+                  ? `${event.content.agent_id} · ${event.content.model}` : event.sender} · #{event.sequence}</div>
+                <p className="whitespace-pre-wrap">{['room.message', 'room.agent.reply'].includes(event.type)
                   ? event.content.text
                   : `${event.type === 'room.agent.added' ? 'Added' : 'Removed'} roster entry: ${event.content.agent_id}`}</p>
               </li>
@@ -110,7 +143,7 @@ function RoomTimeline({ room }) {
         </div>
         <aside className="border border-gray-700 rounded p-3 space-y-3">
           <h3 className="font-semibold">Agent roster</h3>
-          <p className="text-xs text-gray-400">Roster entries only. Agents do not run or respond yet.{more && ' Load remaining events for the complete roster.'}</p>
+          <p className="text-xs text-gray-400">Select a roster entry and a model to request a text-only response.{more && ' Load remaining events for the complete roster.'}</p>
           <ul className="space-y-2">
             {[...roster].sort().map(id => <li key={id} className="flex flex-wrap items-center justify-between gap-2">
               <span className="break-all">{id}</span>
@@ -124,6 +157,28 @@ function RoomTimeline({ room }) {
               disabled={!!pending || submitting} onChange={e => setAgent(e.target.value)} />
             <button className={button} disabled={!agent.trim() || !!pending || submitting || busy}>Add roster entry</button>
           </form>
+          <form className="space-y-2 border-t border-gray-700 pt-3" onSubmit={e => { e.preventDefault(); ask() }}>
+            <label htmlFor="room-participant">Participant</label>
+            <select id="room-participant" className={input} value={participant} disabled={!!turnPending}
+              onChange={e => setParticipant(e.target.value)}>
+              <option value="">Choose agent</option>
+              {[...roster].sort().map(id => <option key={id} value={id}>{id}</option>)}
+            </select>
+            <label htmlFor="room-model">Model</label>
+            <select id="room-model" className={input} value={model} disabled={!!turnPending}
+              onChange={e => setModel(e.target.value)}>
+              <option value="">Choose model</option>
+              {models.map(name => <option key={name} value={name}>{name}</option>)}
+            </select>
+            <label htmlFor="room-question">Ask agent</label>
+            <textarea id="room-question" className={input} rows={3} maxLength={4000}
+              value={question} disabled={!!turnPending} onChange={e => setQuestion(e.target.value)} />
+            <button className={button} disabled={turnBusy || busy || more || (!turnPending &&
+              (!roster.has(participant) || !models.includes(model) || !question.trim()))}>
+              {turnBusy ? 'Waiting for reply…' : turnPending ? 'Check or retry turn' : 'Request response'}
+            </button>
+            {turnPending && <p role="status">Turn requested. Checking again will not launch another turn.</p>}
+          </form>
         </aside>
       </div>
       {pending && !submitting && <div className="space-y-2">
@@ -135,6 +190,8 @@ function RoomTimeline({ room }) {
 }
 
 export default function RoomsPage() {
+  const { models: configuredModels } = useChat()
+  const models = [...new Set((configuredModels || []).map(m => typeof m === 'string' ? m : m.name).filter(Boolean))]
   const [rooms, setRooms] = useState([])
   const [selected, setSelected] = useState(null)
   const [name, setName] = useState('')
@@ -190,7 +247,7 @@ export default function RoomsPage() {
               onClick={() => setSelected(r.id)}>{r.name}</button>
           </li>)}</ul>
         </nav>
-        {room ? <RoomTimeline key={room.id} room={room} /> : <p className="p-4">Create or select a room to start.</p>}
+        {room ? <RoomTimeline key={room.id} room={room} models={models} /> : <p className="p-4">Create or select a room to start.</p>}
       </div>
     </main>
   )

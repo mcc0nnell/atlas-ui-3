@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from atlas.core.log_sanitizer import get_current_user
-from atlas.modules.chat_history.models import RoomEventRecord, RoomRecord
+from atlas.modules.chat_history.models import RoomEventRecord, RoomRecord, RoomTurnRecord
 from atlas.modules.chat_history.room_repository import RoomRepository
 from atlas.routes import room_routes
 
@@ -32,6 +32,7 @@ def repositories():
         b = second.execution_options(schema_translate_map={None: schema})
         RoomRecord.__table__.create(a)
         RoomEventRecord.__table__.create(a)
+        RoomTurnRecord.__table__.create(a)
         yield RoomRepository(sessionmaker(bind=a)), RoomRepository(sessionmaker(bind=b))
     finally:
         second.dispose()
@@ -140,3 +141,59 @@ def test_room_feature_gate(monkeypatch, enabled, history, compliance, expected):
         with pytest.raises(HTTPException) as exc:
             room_routes._repo()
         assert exc.value.status_code == expected
+
+
+def test_room_agent_turn_reservation_and_reply(repositories):
+    from atlas.modules.chat_history.room_repository import AgentNotFound, RoomBusy, RoomNotFound, TransactionConflict
+
+    a, b = repositories
+    owner = "owner@example.com"
+    room = a.create(owner, "Agents")["id"]
+    with pytest.raises(AgentNotFound):
+        a.reserve_turn(owner, room, "t", "Reviewer", "model", "Discuss")
+    a.append(owner, room, "join", "room.agent.added", {"agent_id": "Reviewer"})
+    a.append(owner, room, "msg", "room.message", {"text": "Earlier context"})
+    turn, context = a.reserve_turn(owner, room, "t", "Reviewer", "model", "Discuss")
+    assert turn["state"] == "pending"
+    assert "Earlier context" in context
+    retry, context = b.reserve_turn(owner, room, "t", "Reviewer", "model", "Discuss")
+    assert retry == turn
+    assert context is None
+    with pytest.raises(RoomBusy):
+        b.reserve_turn(owner, room, "other", "Reviewer", "model", "Discuss")
+    with pytest.raises(TransactionConflict):
+        b.reserve_turn(owner, room, "t", "Reviewer", "model", "Different")
+    with pytest.raises(RoomNotFound):
+        b.finish_turn("other@example.com", room, "t", "forged")
+    done = b.finish_turn(owner, room, "t", "Native response")
+    assert done["state"] == "completed"
+    assert a.finish_turn(owner, room, "t", "duplicate") == done
+    reply = a.timeline(owner, room)["events"][-1]
+    assert reply["type"] == "room.agent.reply"
+    assert reply["content"]["agent_id"] == "Reviewer"
+    assert reply["content"]["text"] == "Native response"
+    a.append(owner, room, "leave", "room.agent.removed", {"agent_id": "Reviewer"})
+    with pytest.raises(AgentNotFound):
+        a.reserve_turn(owner, room, "new", "Reviewer", "model", "Discuss")
+
+
+def test_expired_turn_is_not_replayed_and_late_reply_is_ignored(repositories):
+    from datetime import datetime, timedelta, timezone
+
+    a, b = repositories
+    owner = "owner@example.com"
+    room = a.create(owner, "Recovery")["id"]
+    a.append(owner, room, "join", "room.agent.added", {"agent_id": "Reviewer"})
+    a.reserve_turn(owner, room, "old", "Reviewer", "model", "Discuss")
+    with a._session_factory.begin() as session:
+        record = session.get(RoomTurnRecord, (room, "old"))
+        record.created_at = datetime.now(timezone.utc) - timedelta(minutes=4)
+    retry, context = b.reserve_turn(owner, room, "old", "Reviewer", "model", "Discuss")
+    assert retry["state"] == "failed"
+    assert context is None
+    new, context = b.reserve_turn(owner, room, "new", "Reviewer", "model", "Continue")
+    assert new["state"] == "pending"
+    assert context is not None
+    result = a.finish_turn(owner, room, "old", "Late reply")
+    assert result["state"] == "failed"
+    assert [event["type"] for event in a.timeline(owner, room)["events"]] == ["room.agent.added"]

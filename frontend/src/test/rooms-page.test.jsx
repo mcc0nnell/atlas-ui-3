@@ -3,6 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter } from 'react-router-dom'
 import RoomsPage from '../components/RoomsPage'
 
+vi.mock('../contexts/ChatContext', () => ({ useChat: () => ({ models: [{ name: 'model-a' }] }) }))
+
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => data })
 const page = events => ({ events, next_after: events.at(-1)?.sequence || 0, has_more: false })
 const event = (sequence, type, content) => ({ sequence, type, content, sender: 'owner@example.com' })
@@ -75,4 +77,31 @@ describe('RoomsPage', () => {
     expect(attempts).toHaveLength(2)
     expect(attempts[0]).toEqual(attempts[1])
   })
+})
+
+it('requests one model-backed roster response and renders its attribution', async () => {
+  const turns = []
+  const roster = event(1, 'room.agent.added', { agent_id: 'Reviewer' })
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url === '/api/rooms') return response({ rooms: [{ id: 'a', name: 'Atlas' }] })
+    if (url.endsWith('/turns')) {
+      turns.push(JSON.parse(options.body))
+      return response({ state: 'completed' })
+    }
+    if (url.includes('after=1')) return response(page([
+      event(2, 'room.agent.reply', { agent_id: 'Reviewer', model: 'model-a', text: 'Design reviewed' }),
+    ]))
+    return response(page([roster]))
+  }))
+  render(<MemoryRouter><RoomsPage /></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: 'Atlas' }))
+  await screen.findByRole('button', { name: 'Remove Reviewer' })
+  fireEvent.change(screen.getByLabelText('Participant'), { target: { value: 'Reviewer' } })
+  fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'model-a' } })
+  fireEvent.change(screen.getByLabelText('Ask agent'), { target: { value: 'Review the design' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Request response' }))
+  expect(await screen.findByText('Design reviewed')).toBeInTheDocument()
+  expect(screen.getByText('Reviewer · model-a · #2')).toBeInTheDocument()
+  expect(turns).toHaveLength(1)
+  expect(turns[0]).toMatchObject({ agent_id: 'Reviewer', model: 'model-a', prompt: 'Review the design' })
 })

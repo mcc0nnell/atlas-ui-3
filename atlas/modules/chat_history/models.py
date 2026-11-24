@@ -169,3 +169,19 @@ class RoomEventRecord(Base):
     __table_args__ = (
         UniqueConstraint("room_id", "transaction_id", name="uq_room_event_transaction"),
     )
+
+
+class RoomTurnRecord(Base):
+    """Durable reservation for one explicitly requested text-only agent turn."""
+
+    __tablename__ = "collaboration_room_turns"
+
+    room_id = Column(String(36), primary_key=True)
+    transaction_id = Column(String(100), primary_key=True)
+    agent_id = Column(String(200), nullable=False)
+    model = Column(String(200), nullable=False)
+    prompt = Column(Text, nullable=False)
+    state = Column(String(20), nullable=False, default="pending")
+    reply = Column(Text, nullable=True)
+    conversation_id = Column(String(36), nullable=False, default=_uuid_default)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
