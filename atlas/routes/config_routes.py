@@ -226,6 +226,9 @@ async def get_config_shell(
         "help": help_public,
         "features": {
             "workspaces": app_settings.workspaces_effective,
+            "rooms": bool(app_settings.feature_rooms_enabled and app_settings.feature_chat_history_enabled
+                          and not app_settings.feature_compliance_levels_enabled
+                          and getattr(app_factory, "room_repository", None) is not None),
             "rag": app_settings.feature_rag_enabled,
             "tools": app_settings.feature_tools_enabled,
             "marketplace": app_settings.feature_marketplace_enabled,
@@ -543,6 +546,9 @@ async def get_config(
         },
         "features": {
             "workspaces": app_settings.workspaces_effective,
+            "rooms": bool(app_settings.feature_rooms_enabled and app_settings.feature_chat_history_enabled
+                          and not app_settings.feature_compliance_levels_enabled
+                          and getattr(app_factory, "room_repository", None) is not None),
             "rag": app_settings.feature_rag_enabled,
             "tools": app_settings.feature_tools_enabled,
             "marketplace": app_settings.feature_marketplace_enabled,

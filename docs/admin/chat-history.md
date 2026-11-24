@@ -440,3 +440,173 @@ is unaffected — only the stored copy is capped.
 ## User Isolation
 
 All database queries are scoped by `user_email`. Users cannot see, search, modify, or delete conversations belonging to other users.
+
+### Experimental collaboration rooms (fork)
+
+Set `FEATURE_ROOMS_ENABLED=true` with chat history enabled and a PostgreSQL
+chat-history database. The default is disabled. DuckDB is not supported for
+rooms: the timeline requires transactional row locking across API instances.
+
+The authenticated owner can create and list private rooms at `/api/rooms`.
+GET `/api/rooms/{room_id}/events?after=0&limit=100` returns ordered events
+and a resume cursor (`next_after`). POST to the same events endpoint with
+a client-generated transaction ID and a typed event, for example:
+
+```json
+{"transaction_id":"client-uuid","event":{"type":"room.message","text":"Discuss the next release"}}
+```
+
+Use `room.agent.added` or `room.agent.removed` with an `agent_id` to record
+roster changes. These are descriptive events, not invitations or execution
+permissions. Retrying the same transaction and payload returns the same event;
+reusing a transaction ID for different content returns HTTP 409. Room IDs are
+scoped to the authenticated owner. The experimental Rooms page supports creation, manual timeline refresh, message submission, roster editing and explicitly requested text-only model turns. Rooms are disabled in compliance-enabled deployments until room classification support exists. This initial API has no autonomous agent execution, shared human membership, federation, or room deletion. Do not treat
+roster records as authenticated agent messages.
+
+
+#### Room agent turns
+
+A room owner can select a roster entry and an authorized model and explicitly
+request a single text response. The API is `POST /api/rooms/{room_id}/turns`,
+with `transaction_id`, `agent_id`, `model`, and `prompt`. It invokes the
+native Atlas launcher in a text-only mode (no tools, data sources, or agent
+loop). The user must initiate each turn. The model receives bounded recent
+room context, including prior participants' replies, plus the selected
+participant's own recent completed prompts and replies. Each membership
+generation has a durable identity; duplicate additions preserve it, while
+removal and re-addition creates a new identity. The roster endpoint
+`GET /api/rooms/{room_id}/participants` exposes the bounded history count
+and last model, not individual prompt contents.
+
+Each turn still uses a fresh native conversation. Individual history is
+rehydrated from the room's committed turn records, rather than allowing an
+expired invocation or ordinary chat edit to mutate a shared native history.
+Only completed turns linked to a membership by this version enter individual
+history; older replies remain visible in the shared timeline. Up to 12 recent
+completed turns are considered, within an 8,000-character JSON budget;
+shared context is separately bounded. Replies are shared, not private
+messages, and may include information from their input prompts.
+
+A PostgreSQL reservation prevents overlapping room turns and repeated model
+invocations with the same transaction ID. Successful responses become
+server-authored `room.agent.reply` events. A timed-out or failed turn is not
+automatically retried. After three minutes a later explicit request can mark
+an abandoned reservation failed; a late reply cannot change that status or
+append a room event. The fork's native run registry remains replica-local;
+this room-specific reservation is not a substitute for upstream run
+coordination. No live push messaging or autonomous agent scheduling is added.
+
+
+#### Room artifacts (experimental)
+
+Room owners can save inert documents, workflow definitions and result text
+(up to 64,000 characters per revision). The timeline stores references, not
+artifact bodies. Each revision is immutable and committed atomically with its
+timeline event under the room row lock. Use a stable UUID artifact ID and a
+base revision of zero for a new artifact, or the current revision for an
+edit. The artifact kind cannot change. A stale edit receives HTTP 409.
+
+```json
+{"transaction_id":"client-uuid","event":{"type":"room.artifact.revised","artifact_id":"8d184f2e-34e8-49c4-9c26-651a0d3671fc","base_revision":0,"kind":"workflow","title":"Example","text":"INPUT FROM echo[data=example]"}}
+```
+
+GET `/api/rooms/{room_id}/artifacts/{artifact_id}/revisions/{revision}`
+returns the exact body and SHA-256 digest to the authenticated owner.
+The Rooms UI can save and open revisions from the timeline. Artifacts are
+plain text; saving or opening one does not invoke a model, compile a workflow,
+or execute code. Artifact contents are not automatically inserted into model
+context. Unknown timeline event types are displayed generically. Future
+notification transports may use committed room sequence cursors to reconcile
+state; no live notification transport is included in this implementation.
+
+#### Notebook artifacts (experimental)
+
+Rooms support standard nbformat 4.5+ notebook JSON with unique stable cell IDs.
+A notebook uses the same immutable artifact revision and compare-and-set save
+contract. The UI provides a plain-text cell editor, Markdown/code cell creation,
+and download of the exact saved .ipynb. Code, outputs and Markdown are inert;
+no kernel or model is started. Editing a code cell clears its previous outputs.
+Cell discussions use room.notebook.comment with artifact_id, revision, cell_id
+and text; the server resolves the exact owner-scoped immutable revision and
+rejects missing cells. The timeline polls every five seconds and shows newer
+revisions without overwriting a local draft. Snapshot edits use compare-and-set conflict detection. Open live notebook to
+use Jupyter YDoc's native CRDT with a shared persisted state. The browser
+exchanges bounded native Yjs updates every two seconds through the owner-scoped
+collaboration endpoint. Each visible merge atomically writes an immutable
+notebook checkpoint and timeline reference. Retrying the same CRDT update
+does not duplicate a revision. Once live collaboration starts, direct snapshot
+replacement is rejected; the live editor is the write path. The state is
+bounded to 256 KiB and the notebook retains the 64,000 character limit.
+Unacknowledged edits are retained in the current tab, not durable across
+closing or navigation. This is polling-based collaboration for sessions of the
+same authenticated owner, not multi-user sharing, WebSocket RTC, or Jupyter
+Chat interoperability. Kernel execution is not included.
+
+#### Operator-side notebook execution proof
+
+The developer-only `scripts/notebook_runner` bridge reads an exact notebook
+checkpoint through an already-authorized Rooms API client, verifies its digest,
+and uses `nbclient` and a fresh Python kernel in a rootless Podman container.
+The runner requires a preapproved local image ID, cgroup v2, and an explicitly
+chosen read-only Jupyter/TalkPipe dependency directory. It uses no network,
+read-only root filesystem, dropped capabilities, a non-root container user,
+bounded memory/process/CPU/output resources, and a wall-clock timeout. No
+host credentials or container socket are mounted. The result is a separate
+standard notebook artifact with original cell IDs, standard outputs, and
+operator-reported input revision/digest and runtime metadata. Publication is
+explicit and idempotent for the prepared result; retry publication does not
+rerun the kernel. The source notebook remains unchanged. The UI renders saved
+text output only; rich MIME bundles are retained for export, not rendered.
+
+This is an opt-in local integration proof, not a production execution service
+or a browser Run button. It does not change the existing code-executor-v2
+sandbox, expose a new execution API, grant an agent execution authority, or
+claim that operator-reported metadata is a server attestation. An isolated
+worker service with independently reviewed runtime images, authorization,
+concurrency and quota policy, durable run IDs/status, cancellation and audited
+cleanup is still required before offering execution to users. The test is
+opt-in using `ATLAS_NOTEBOOK_TEST_IMAGE`, `ATLAS_NOTEBOOK_TEST_DEPS`, and the
+existing disposable PostgreSQL test configuration.
+
+#### Notebook run requests (experimental, off by default)
+
+`feature_room_notebook_runs_enabled` (default false) adds a run-request control
+when viewing an acknowledged saved notebook. Rooms and PostgreSQL chat history
+must also be enabled, and compliance mode must be off. The owner explicitly
+approves the displayed immutable revision and SHA-256 digest. A request creates
+a durable queue record and timeline event; it does not execute code in the web
+server. The same run ID is idempotent, one queued/running run per room is
+permitted, and queued requests can be cancelled. Running requests are subject
+to the isolated worker wall-clock limit; active cancellation is not yet
+implemented. Failed or interrupted workers are never automatically replayed.
+A worker process killed before terminal persistence may leave a running record
+requiring operator reconciliation; automatic recovery is not implemented.
+
+A trusted operator can explicitly start the one-shot `scripts.notebook_runner.worker`
+module for an approved run ID in an identified room, using the designated owner,
+preapproved image and dedicated dependency directory. Its database connection
+is supplied through `ATLAS_NOTEBOOK_WORKER_DATABASE_URL` and never mounted into
+notebook containers. The worker claims the run exactly once, executes the
+checkpoint using the existing isolated bridge, and commits the result artifact,
+terminal status and timeline events atomically. The source revision remains
+unchanged. The API provides owner-scoped request/status/queued cancellation;
+worker claim and finish are not HTTP endpoints. UI status is reconciled through
+the existing timeline polling. The current local prototype is not a deployed
+multi-tenant execution service; a supervised worker service, worker crash
+reconciliation, stronger isolation review, global concurrency and quotas,
+running cancellation, and production authentication/deployment verification
+remain prerequisites. No agent tool can invoke this worker.
+
+#### Review saved notebook results with a room participant
+
+A completed run's saved notebook can be explicitly attached to a text-only
+model request. Select a roster participant and model, open the saved result,
+then opt in to sending the previewed plain-text output and provenance. The
+selection is cleared when changing participant, model or artifact. Notebook
+source code and rich MIME outputs are not included. The complete prompt must
+fit the existing 4,000-character turn limit; oversized results are not
+silently truncated. The selected model receives the question and selected
+data, which are persisted in participant history and may be reused in later
+turns. Outputs are untrusted data, not instructions. No notebook execution
+or tool access is granted by the model request. The digest is a reference
+to the saved artifact, not an independent browser attestation.

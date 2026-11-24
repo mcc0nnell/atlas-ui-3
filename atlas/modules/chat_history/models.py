@@ -139,3 +139,104 @@ class UserWorkspaceRecord(Base):
     __table_args__ = (
         Index("ix_user_workspaces_user_updated", "user_email", "updated_at"),
     )
+
+
+class RoomRecord(Base):
+    """Owner-scoped collaboration room with a durable sequence counter."""
+
+    __tablename__ = "collaboration_rooms"
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    owner = Column(String(255), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    last_sequence = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+
+
+class RoomEventRecord(Base):
+    """Immutable timeline event; sequence is serialized by the room row lock."""
+
+    __tablename__ = "collaboration_room_events"
+
+    room_id = Column(String(36), primary_key=True)
+    sequence = Column(Integer, primary_key=True)
+    transaction_id = Column(String(100), nullable=False)
+    sender = Column(String(255), nullable=False)
+    event_type = Column(String(50), nullable=False)
+    content_json = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("room_id", "transaction_id", name="uq_room_event_transaction"),
+    )
+
+
+class RoomTurnRecord(Base):
+    """Durable reservation for one explicitly requested text-only agent turn."""
+
+    __tablename__ = "collaboration_room_turns"
+
+    room_id = Column(String(36), primary_key=True)
+    transaction_id = Column(String(100), primary_key=True)
+    agent_id = Column(String(200), nullable=False)
+    model = Column(String(200), nullable=False)
+    prompt = Column(Text, nullable=False)
+    state = Column(String(20), nullable=False, default="pending")
+    reply = Column(Text, nullable=True)
+    conversation_id = Column(String(36), nullable=False, default=_uuid_default)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+
+
+class RoomParticipantTurnRecord(Base):
+    """Bind a turn to an immutable membership generation, not a display name."""
+
+    __tablename__ = "collaboration_room_participant_turns"
+
+    room_id = Column(String(36), primary_key=True)
+    transaction_id = Column(String(100), primary_key=True)
+    member_sequence = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index("ix_room_participant_turns_member", "room_id", "member_sequence"),
+    )
+
+
+class RoomArtifactRevisionRecord(Base):
+    """Immutable inert artifact content, scoped to a room and revision."""
+
+    __tablename__ = "collaboration_room_artifact_revisions"
+
+    room_id = Column(String(36), primary_key=True)
+    artifact_id = Column(String(36), primary_key=True)
+    revision = Column(Integer, primary_key=True)
+    kind = Column(String(20), nullable=False)
+    title = Column(String(200), nullable=False)
+    text = Column(Text, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    digest = Column(String(64), nullable=False)
+
+
+class RoomNotebookStateRecord(Base):
+    """One bounded YDoc state per collaborative notebook; checkpoints stay immutable."""
+
+    __tablename__ = "collaboration_room_notebook_states"
+    room_id = Column(String(36), primary_key=True)
+    artifact_id = Column(String(36), primary_key=True)
+    revision = Column(Integer, nullable=False)
+    state = Column(Text, nullable=False)
+
+
+class RoomNotebookRunRecord(Base):
+    """Durable user request for one exact checkpoint, claimed once by a trusted worker."""
+
+    __tablename__ = "collaboration_room_notebook_runs"
+    room_id = Column(String(36), primary_key=True)
+    run_id = Column(String(36), primary_key=True)
+    artifact_id = Column(String(36), nullable=False)
+    revision = Column(Integer, nullable=False)
+    source_sha256 = Column(String(64), nullable=False)
+    state = Column(String(20), nullable=False, default="queued")
+    result_artifact_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)

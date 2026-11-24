@@ -335,6 +335,12 @@ const Header = ({ ragPanelOpen, onToggleSidebar, onToggleRag, onToggleFiles, onT
             The name follows the bar's own width like every other label, so a
             narrow bar with a wide sidebar does not squeeze it out. */}
         {features?.workspaces && <WorkspaceSelector showName={showActionLabels} />}
+        {features?.rooms && (
+          <button type="button" onClick={() => navigate('/rooms')}
+            className="px-2 py-1 rounded border border-gray-600 hover:bg-gray-700 text-sm">
+            Rooms
+          </button>
+        )}
       </div>
 
       {/* Right section */}

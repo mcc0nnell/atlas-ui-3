@@ -21,6 +21,7 @@ import TelemetryDashboard from './components/TelemetryDashboard'
 import FeedbackButton from './components/FeedbackButton'
 import FileManagerPanel from './components/FileManagerPanel'
 import FilesPage from './components/FilesPage'
+import RoomsPage from './components/RoomsPage'
 import SplashScreen from './components/SplashScreen'
 import ElicitationDialog from './components/ElicitationDialog'
 import { ToastProvider, DialogProvider } from './components/ui/ToastProvider'
@@ -282,7 +283,7 @@ function UserSplashScreen({ config }) {
 }
 
 function AppRoutes() {
-  const { features } = useChat()
+  const { features, user } = useChat()
 
   return (
     <div
@@ -301,6 +302,7 @@ function AppRoutes() {
           <Route path="/help" element={<HelpPage />} />
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/files" element={<FilesPage />} />
+          {features?.rooms && <Route path="/rooms" element={<RoomsPage key={user || "anonymous"} />} />}
           <Route path="/admin/logview" element={<LogViewer />} /> {/* New route for LogViewer */}
           <Route path="/admin/telemetry" element={<TelemetryDashboard />} />
         </Routes>

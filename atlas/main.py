@@ -122,6 +122,7 @@ from atlas.routes.mcp_auth_routes import router as mcp_auth_router
 from atlas.routes.oidc_auth_routes import api_router as oidc_api_router
 from atlas.routes.oidc_auth_routes import browser_router as oidc_browser_router
 from atlas.routes.persona_routes import router as persona_router
+from atlas.routes.room_routes import router as room_router
 from atlas.routes.suggestion_routes import suggestion_router
 from atlas.routes.telemetry_routes import telemetry_router
 from atlas.routes.user_prompt_routes import router as user_prompt_router
@@ -1576,6 +1577,7 @@ app.include_router(agent_run_router)
 app.include_router(user_prompt_router)
 app.include_router(persona_router)
 app.include_router(workspace_router)
+app.include_router(room_router)
 app.include_router(suggestion_router)
 # Globus OAuth routes (browser-facing login/callback + JSON API)
 app.include_router(globus_browser_router)
