@@ -924,6 +924,7 @@ class AppSettings(BaseSettings):
 
     # Feature flags
     feature_workspaces_enabled: bool = False
+    feature_rooms_enabled: bool = False
     feature_tools_enabled: bool = False
     feature_marketplace_enabled: bool = False
     feature_files_panel_enabled: bool = False

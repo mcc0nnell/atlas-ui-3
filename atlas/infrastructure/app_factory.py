@@ -113,6 +113,7 @@ class AppFactory:
         self.conversation_repository = None
         self.user_prompt_repository = None
         self.workspace_repository = None
+        self.room_repository = None
         self._init_chat_history()
 
         logger.info("AppFactory initialized")
@@ -146,6 +147,11 @@ class AppFactory:
             self.conversation_repository = ConversationRepository(session_factory)
             self.user_prompt_repository = UserPromptRepository(session_factory)
             self.workspace_repository = WorkspaceRepository(session_factory)
+            if app_settings.feature_rooms_enabled:
+                from atlas.modules.chat_history.room_repository import RoomRepository
+
+                if session_factory.kw["bind"].dialect.name == "postgresql":
+                    self.room_repository = RoomRepository(session_factory)
             self.startup_outcomes["chat_history"] = "ok"
             logger.info("Chat history persistence initialized")
         except Exception as e:  # noqa: BLE001

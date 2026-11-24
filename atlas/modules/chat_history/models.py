@@ -139,3 +139,33 @@ class UserWorkspaceRecord(Base):
     __table_args__ = (
         Index("ix_user_workspaces_user_updated", "user_email", "updated_at"),
     )
+
+
+class RoomRecord(Base):
+    """Owner-scoped collaboration room with a durable sequence counter."""
+
+    __tablename__ = "collaboration_rooms"
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    owner = Column(String(255), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    last_sequence = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+
+
+class RoomEventRecord(Base):
+    """Immutable timeline event; sequence is serialized by the room row lock."""
+
+    __tablename__ = "collaboration_room_events"
+
+    room_id = Column(String(36), primary_key=True)
+    sequence = Column(Integer, primary_key=True)
+    transaction_id = Column(String(100), nullable=False)
+    sender = Column(String(255), nullable=False)
+    event_type = Column(String(50), nullable=False)
+    content_json = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("room_id", "transaction_id", name="uq_room_event_transaction"),
+    )

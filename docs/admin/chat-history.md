@@ -440,3 +440,26 @@ is unaffected — only the stored copy is capped.
 ## User Isolation
 
 All database queries are scoped by `user_email`. Users cannot see, search, modify, or delete conversations belonging to other users.
+
+### Experimental collaboration rooms (fork)
+
+Set `FEATURE_ROOMS_ENABLED=true` with chat history enabled and a PostgreSQL
+chat-history database. The default is disabled. DuckDB is not supported for
+rooms: the timeline requires transactional row locking across API instances.
+
+The authenticated owner can create and list private rooms at `/api/rooms`.
+GET `/api/rooms/{room_id}/events?after=0&limit=100` returns ordered events
+and a resume cursor (`next_after`). POST to the same events endpoint with
+a client-generated transaction ID and a typed event, for example:
+
+```json
+{"transaction_id":"client-uuid","event":{"type":"room.message","text":"Discuss the next release"}}
+```
+
+Use `room.agent.added` or `room.agent.removed` with an `agent_id` to record
+roster changes. These are descriptive events, not invitations or execution
+permissions. Retrying the same transaction and payload returns the same event;
+reusing a transaction ID for different content returns HTTP 409. Room IDs are
+scoped to the authenticated owner. This initial API has no UI, automated agent
+execution, shared human membership, federation, or room deletion. Do not treat
+roster records as authenticated agent messages.
