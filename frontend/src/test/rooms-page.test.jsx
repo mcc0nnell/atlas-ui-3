@@ -120,3 +120,31 @@ it('restores the participant model preference and remembered turn count', async 
   fireEvent.change(screen.getByLabelText('Participant'), { target: { value: 'Reviewer' } })
   expect(screen.getByLabelText('Model')).toHaveValue('model-a')
 })
+
+it('saves and opens an inert artifact revision without treating it as a roster change', async () => {
+  let saved
+  const fetcher = vi.fn(async (url, options) => {
+    if (url === '/api/rooms') return response({ rooms: [{ id: 'a', name: 'Atlas' }] })
+    if (url.endsWith('/participants')) return response({ participants: [] })
+    if (url.includes('/artifacts/')) return response({ ...saved.content, text: 'INPUT FROM echo' })
+    if (options?.method === 'POST') {
+      const payload = JSON.parse(options.body)
+      expect(payload.event).toMatchObject({ kind: 'workflow', base_revision: 0, title: 'Pipeline', text: 'INPUT FROM echo' })
+      saved = event(1, 'room.artifact.revised', { artifact_id: payload.event.artifact_id, kind: 'workflow', title: 'Pipeline', revision: 1 })
+      return response(saved)
+    }
+    return response(page(saved ? [saved] : []))
+  })
+  vi.stubGlobal('fetch', fetcher)
+  render(<MemoryRouter><RoomsPage /></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: 'Atlas' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh timeline' })).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('Artifact title'), { target: { value: 'Pipeline' } })
+  fireEvent.change(screen.getByLabelText('Artifact type'), { target: { value: 'workflow' } })
+  fireEvent.change(screen.getByLabelText('Artifact content'), { target: { value: 'INPUT FROM echo' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save artifact revision' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Open Pipeline revision 1' }))
+  await waitFor(() => expect(screen.getByLabelText('Artifact content')).toHaveValue('INPUT FROM echo'))
+  expect(screen.getByText('Editing revision 1. Saving creates a new revision.')).toBeInTheDocument()
+  expect(screen.queryByText('Removed roster entry: undefined')).not.toBeInTheDocument()
+})

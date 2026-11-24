@@ -12,7 +12,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from atlas.core.log_sanitizer import get_current_user
-from atlas.modules.chat_history.models import RoomEventRecord, RoomParticipantTurnRecord, RoomRecord, RoomTurnRecord
+from atlas.modules.chat_history.models import (
+    RoomArtifactRevisionRecord,
+    RoomEventRecord,
+    RoomParticipantTurnRecord,
+    RoomRecord,
+    RoomTurnRecord,
+)
 from atlas.modules.chat_history.room_repository import RoomRepository
 from atlas.routes import room_routes
 
@@ -34,6 +40,7 @@ def repositories():
         RoomEventRecord.__table__.create(a)
         RoomTurnRecord.__table__.create(a)
         RoomParticipantTurnRecord.__table__.create(a)
+        RoomArtifactRevisionRecord.__table__.create(a)
         yield RoomRepository(sessionmaker(bind=a)), RoomRepository(sessionmaker(bind=b))
     finally:
         second.dispose()
@@ -244,3 +251,72 @@ def test_persistent_participant_history_is_scoped_and_generation_safe(repositori
 def test_context_budget_preserves_complete_records():
     items = [{"text": "old"}, {"text": "x" * 500}, {"text": "latest"}]
     assert RoomRepository._bounded_context(items, 70) == [items[0], items[2]]
+
+def test_artifact_revisions_are_immutable_and_owner_scoped(repositories):
+    a, b = repositories
+    owner = client(a, "owner@example.com")
+    same = client(b, "owner@example.com")
+    other = client(b, "other@example.com")
+    room = owner.post("/api/rooms", json={"name": "Research"}).json()["id"]
+    other_room = owner.post("/api/rooms", json={"name": "Separate"}).json()["id"]
+    artifact = str(uuid.uuid4())
+    path = f"/api/rooms/{room}/events"
+    base = f"/api/rooms/{room}/artifacts/{artifact}/revisions"
+    body = {"transaction_id": "a", "event": {"type": "room.artifact.revised",
+            "artifact_id": artifact, "base_revision": 0, "kind": "workflow",
+            "title": "Pipeline", "text": "inert v1"}}
+    first = owner.post(path, json=body)
+    assert first.status_code == 200
+    assert first.json()["content"]["revision"] == 1
+    assert "text" not in first.json()["content"]
+    assert same.post(path, json=body).json() == first.json()
+    assert other.post(path, json=body).status_code == 404
+    assert other.get(base + "/1").status_code == 404
+    assert owner.get(f"/api/rooms/{other_room}/artifacts/{artifact}/revisions/1").status_code == 404
+    body["event"]["text"] = "inert v2"
+    assert same.post(path, json=body).status_code == 409
+    body["transaction_id"] = "b"
+    assert same.post(path, json=body).status_code == 409
+    body["event"]["base_revision"] = 1
+    second = same.post(path, json=body)
+    assert second.status_code == 200
+    assert second.json()["sequence"] == 2
+    assert owner.get(base + "/1").json()["text"] == "inert v1"
+    assert owner.get(base + "/2").json()["text"] == "inert v2"
+    assert owner.get(base + "/3").status_code == 404
+    assert owner.get(path).json()["next_after"] == 2
+    body["transaction_id"] = "c"
+    body["event"]["base_revision"] = 2
+    body["event"]["kind"] = "document"
+    assert same.post(path, json=body).status_code == 409
+
+
+def test_artifact_compare_and_set_across_repositories(repositories):
+    from atlas.modules.chat_history.room_repository import ArtifactConflict
+
+    a, b = repositories
+    user = "owner@example.com"
+    room = a.create(user, "Race")["id"]
+    artifact = str(uuid.uuid4())
+    def write(i):
+        try:
+            return (a if i == 0 else b).revise_artifact(
+                user, room, str(i), artifact, 0, "document", "Note", str(i))
+        except ArtifactConflict:
+            return None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(write, range(2)))
+    assert sum(result is not None for result in results) == 1
+    assert len(a.timeline(user, room)["events"]) == 1
+    assert b.artifact_revision(user, room, artifact, 1)["text"] in ("0", "1")
+
+
+def test_artifact_payload_validation_without_database():
+    c = client(object(), "owner@example.com")
+    event = {"type": "room.artifact.revised", "artifact_id": str(uuid.uuid4()),
+             "base_revision": 0, "kind": "workflow", "title": "Example", "text": "inert"}
+    for change in ({"base_revision": -1}, {"base_revision": True}, {"base_revision": 2147483647},
+                   {"artifact_id": "bad"}, {"kind": "unknown"}, {"text": "x" * 64001},
+                   {"text": "a\x00b"}, {"title": "a\x00b"}, {"revision": 1},
+                   {"sender": "other@example.com"}):
+        assert c.post("/api/rooms/r/events", json={"transaction_id": "t", "event": {**event, **change}}).status_code == 422

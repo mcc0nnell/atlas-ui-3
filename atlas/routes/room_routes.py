@@ -3,13 +3,20 @@
 import asyncio
 import logging
 from typing import Annotated, Literal, Union
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, StringConstraints
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from atlas.core.log_sanitizer import get_current_user
-from atlas.modules.chat_history.room_repository import AgentNotFound, RoomBusy, RoomNotFound, TransactionConflict
+from atlas.modules.chat_history.room_repository import (
+    AgentNotFound,
+    ArtifactConflict,
+    RoomBusy,
+    RoomNotFound,
+    TransactionConflict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +44,29 @@ class AgentEvent(ClosedModel):
     agent_id: Name
 
 
+class ArtifactEvent(ClosedModel):
+    type: Literal["room.artifact.revised"]
+    artifact_id: UUID
+    base_revision: Annotated[int, Field(strict=True, ge=0, lt=2147483647)]
+    kind: Literal["document", "workflow", "result"]
+    title: Name
+    text: Annotated[str, StringConstraints(max_length=64000)]
+
+    @field_validator("title", "text")
+    @classmethod
+    def valid_storage_text(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Null characters are not supported")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Invalid Unicode text") from exc
+        return value
+
+
 class AppendEvent(ClosedModel):
     transaction_id: TransactionId
-    event: Annotated[Union[MessageEvent, AgentEvent], Field(discriminator="type")]
+    event: Annotated[Union[MessageEvent, AgentEvent, ArtifactEvent], Field(discriminator="type")]
 
 
 def _repo():
@@ -77,12 +104,27 @@ def timeline(room_id: RoomId, after: int = Query(0, ge=0), limit: int = Query(10
 def append_event(room_id: RoomId, body: AppendEvent, user: str = Depends(get_current_user),
                  repo=Depends(_repo)):
     try:
+        if isinstance(body.event, ArtifactEvent):
+            event = body.event
+            return repo.revise_artifact(user, room_id, body.transaction_id, str(event.artifact_id),
+                                        event.base_revision, event.kind, event.title, event.text)
         return repo.append(user, room_id, body.transaction_id, body.event.type,
                            body.event.model_dump(exclude={"type"}))
     except RoomNotFound as exc:
         raise HTTPException(404, "Room not found") from exc
     except TransactionConflict as exc:
         raise HTTPException(409, "Transaction identifier already used") from exc
+    except ArtifactConflict as exc:
+        raise HTTPException(409, "Artifact revision conflict; refresh before editing") from exc
+
+
+@router.get("/{room_id}/artifacts/{artifact_id}/revisions/{revision}")
+def artifact_revision(room_id: RoomId, artifact_id: UUID, revision: int = Path(ge=1, le=2147483647),
+                      user: str = Depends(get_current_user), repo=Depends(_repo)):
+    try:
+        return repo.artifact_revision(user, room_id, str(artifact_id), revision)
+    except RoomNotFound as exc:
+        raise HTTPException(404, "Room or artifact revision not found") from exc
 
 
 @router.get("/{room_id}/participants")

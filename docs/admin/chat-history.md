@@ -495,3 +495,26 @@ an abandoned reservation failed; a late reply cannot change that status or
 append a room event. The fork's native run registry remains replica-local;
 this room-specific reservation is not a substitute for upstream run
 coordination. No live push messaging or autonomous agent scheduling is added.
+
+
+#### Room artifacts (experimental)
+
+Room owners can save inert documents, workflow definitions and result text
+(up to 64,000 characters per revision). The timeline stores references, not
+artifact bodies. Each revision is immutable and committed atomically with its
+timeline event under the room row lock. Use a stable UUID artifact ID and a
+base revision of zero for a new artifact, or the current revision for an
+edit. The artifact kind cannot change. A stale edit receives HTTP 409.
+
+```json
+{"transaction_id":"client-uuid","event":{"type":"room.artifact.revised","artifact_id":"8d184f2e-34e8-49c4-9c26-651a0d3671fc","base_revision":0,"kind":"workflow","title":"Example","text":"INPUT FROM echo[data=example]"}}
+```
+
+GET `/api/rooms/{room_id}/artifacts/{artifact_id}/revisions/{revision}`
+returns the exact body and SHA-256 digest to the authenticated owner.
+The Rooms UI can save and open revisions from the timeline. Artifacts are
+plain text; saving or opening one does not invoke a model, compile a workflow,
+or execute code. Artifact contents are not automatically inserted into model
+context. Unknown timeline event types are displayed generically. Future
+notification transports may use committed room sequence cursors to reconcile
+state; no live notification transport is included in this implementation.

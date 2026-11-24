@@ -7,7 +7,11 @@ const input = 'w-full min-w-0 rounded bg-gray-800 border border-gray-600 p-2 tex
 
 async function request(path, options) {
   const response = await fetch(path, options)
-  if (!response.ok) throw new Error(`Room request failed (${response.status})`)
+  if (!response.ok) {
+    const error = new Error(`Room request failed (${response.status})`)
+    error.status = response.status
+    throw error
+  }
   return response.json()
 }
 
@@ -39,6 +43,39 @@ function RoomTimeline({ room, models }) {
   const turnLock = useRef(false)
   const [pending, setPending] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [artifact, setArtifact] = useState(null)
+  const [artifactTitle, setArtifactTitle] = useState('')
+  const [artifactKind, setArtifactKind] = useState('document')
+  const [artifactText, setArtifactText] = useState('')
+  const [artifactLoading, setArtifactLoading] = useState(false)
+  const artifactRequest = useRef(0)
+
+  const resetArtifact = () => {
+    artifactRequest.current += 1
+    setArtifactLoading(false)
+    setArtifact(null)
+    setArtifactTitle('')
+    setArtifactKind('document')
+    setArtifactText('')
+  }
+
+  const viewArtifact = async content => {
+    const requestId = ++artifactRequest.current
+    setArtifactLoading(true)
+    setError('')
+    try {
+      const revision = await request(`/api/rooms/${encodeURIComponent(room.id)}/artifacts/${encodeURIComponent(content.artifact_id)}/revisions/${content.revision}`)
+      if (requestId !== artifactRequest.current) return
+      setArtifact(revision)
+      setArtifactTitle(revision.title)
+      setArtifactKind(revision.kind)
+      setArtifactText(revision.text)
+    } catch (err) {
+      if (requestId === artifactRequest.current) setError(err.message)
+    } finally {
+      if (requestId === artifactRequest.current) setArtifactLoading(false)
+    }
+  }
 
   const sync = useCallback(async () => {
     if (loading.current) return
@@ -73,9 +110,13 @@ function RoomTimeline({ room, models }) {
       setPending(null)
       if (payload.event.type === 'room.message') setMessage('')
       if (payload.event.type === 'room.agent.added') setAgent('')
+      if (payload.event.type === 'room.artifact.revised') resetArtifact()
       await sync()
     } catch (err) {
-      setError(err.message)
+      if (err.status === 409 && (pending?.event || event).type === 'room.artifact.revised') {
+        setPending(null)
+        setError('Artifact conflict. Refresh and open the latest revision before saving again.')
+      } else setError(err.message)
     } finally {
       sending.current = false
       setSubmitting(false)
@@ -131,9 +172,17 @@ function RoomTimeline({ room, models }) {
               <li key={event.sequence} className="border border-gray-700 rounded p-3 break-words">
                 <div className="text-xs text-gray-400">{event.type === 'room.agent.reply'
                   ? `${event.content.agent_id} · ${event.content.model}` : event.sender} · #{event.sequence}</div>
-                <p className="whitespace-pre-wrap">{['room.message', 'room.agent.reply'].includes(event.type)
-                  ? event.content.text
-                  : `${event.type === 'room.agent.added' ? 'Added' : 'Removed'} roster entry: ${event.content.agent_id}`}</p>
+                {['room.message', 'room.agent.reply'].includes(event.type) ? (
+                  <p className="whitespace-pre-wrap">{event.content.text}</p>
+                ) : ['room.agent.added', 'room.agent.removed'].includes(event.type) ? (
+                  <p>{event.type === 'room.agent.added' ? 'Added' : 'Removed'} roster entry: {event.content.agent_id}</p>
+                ) : event.type === 'room.artifact.revised' ? (
+                  <div>
+                    <p>{event.content.title} · {event.content.kind} · revision {event.content.revision}</p>
+                    <button className={button} disabled={!!pending || submitting || artifactLoading}
+                      onClick={() => viewArtifact(event.content)}>Open {event.content.title} revision {event.content.revision}</button>
+                  </div>
+                ) : <p>Room event: {event.type}</p>}
               </li>
             ))}
           </ol>
@@ -144,6 +193,32 @@ function RoomTimeline({ room, models }) {
               maxLength={16000} disabled={!!pending || submitting} onChange={e => setMessage(e.target.value)} />
             <button className={button} disabled={!message.trim() || !!pending || submitting || busy}>Send message</button>
           </form>
+          <section className="mt-6 border border-gray-700 rounded p-3 space-y-2" aria-label="Room artifacts">
+            <h3 className="font-semibold">Artifacts</h3>
+            <p className="text-sm text-gray-400">Save inert documents, workflow definitions, or results. Revisions are immutable; nothing here executes.</p>
+            <button className={button} disabled={!!pending || submitting} onClick={resetArtifact}>New artifact</button>
+            {artifact && <p>Editing revision {artifact.revision}. Saving creates a new revision.</p>}
+            <form className="space-y-2" onSubmit={e => {
+              e.preventDefault()
+              append({ type: 'room.artifact.revised', artifact_id: artifact?.artifact_id || crypto.randomUUID(),
+                base_revision: artifact?.revision || 0, kind: artifactKind, title: artifactTitle.trim(), text: artifactText })
+            }}>
+              <label htmlFor="artifact-title">Artifact title</label>
+              <input id="artifact-title" className={input} maxLength={200} value={artifactTitle}
+                disabled={!!pending || submitting || artifactLoading} onChange={e => setArtifactTitle(e.target.value)} />
+              <label htmlFor="artifact-kind">Artifact type</label>
+              <select id="artifact-kind" className={input} value={artifactKind}
+                disabled={!!artifact || !!pending || submitting || artifactLoading} onChange={e => setArtifactKind(e.target.value)}>
+                <option value="document">Document</option>
+                <option value="workflow">Workflow</option>
+                <option value="result">Result</option>
+              </select>
+              <label htmlFor="artifact-text">Artifact content</label>
+              <textarea id="artifact-text" className={input} rows={6} maxLength={64000} value={artifactText}
+                disabled={!!pending || submitting || artifactLoading} onChange={e => setArtifactText(e.target.value)} />
+              <button className={button} disabled={!artifactTitle.trim() || !!pending || submitting || busy || artifactLoading}>Save artifact revision</button>
+            </form>
+          </section>
         </div>
         <aside className="border border-gray-700 rounded p-3 space-y-3">
           <h3 className="font-semibold">Agent roster</h3>

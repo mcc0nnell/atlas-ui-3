@@ -1,5 +1,6 @@
 """Durable Matrix-inspired rooms. PostgreSQL serializes each room's timeline."""
 
+import hashlib
 import json
 import uuid
 from datetime import timedelta
@@ -8,7 +9,7 @@ from sqlalchemy import func, select, update
 
 from atlas.core.user_identity import normalize_user_email
 
-from .models import RoomEventRecord, RoomParticipantTurnRecord, RoomRecord, RoomTurnRecord
+from .models import RoomArtifactRevisionRecord, RoomEventRecord, RoomParticipantTurnRecord, RoomRecord, RoomTurnRecord
 
 
 class RoomNotFound(Exception):
@@ -17,6 +18,10 @@ class RoomNotFound(Exception):
 
 class TransactionConflict(Exception):
     """A transaction identifier was reused with different content."""
+
+
+class ArtifactConflict(Exception):
+    """The proposed revision does not match the current artifact head."""
 
 
 class RoomBusy(Exception):
@@ -82,7 +87,7 @@ class RoomRepository:
 
     def append(self, user, room_id, transaction_id, event_type, content):
         # Internal reply identifiers and event types are never supplied by the client.
-        if transaction_id.startswith("agent-turn:"):
+        if transaction_id.startswith("agent-turn:") or event_type == "room.artifact.revised":
             raise TransactionConflict()
         # The owner and the sender are derived from authentication, not the payload.
         encoded = json.dumps(content, sort_keys=True, separators=(",", ":"))
@@ -105,6 +110,58 @@ class RoomRepository:
             session.add(event)
             session.flush()
             return self._event(event)
+
+    def revise_artifact(self, user, room_id, transaction_id, artifact_id, base_revision, kind, title, text):
+        """Commit a compare-and-set revision and its reference event atomically."""
+        if transaction_id.startswith("agent-turn:"):
+            raise TransactionConflict()
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        content = {
+            "artifact_id": artifact_id, "revision": base_revision + 1,
+            "kind": kind, "title": title, "sha256": digest,
+        }
+        encoded = json.dumps(content, sort_keys=True, separators=(",", ":"))
+        with self._session_factory.begin() as session:
+            room = self._find(session, user, room_id, lock=True)
+            existing = session.scalar(select(RoomEventRecord).where(
+                RoomEventRecord.room_id == room_id,
+                RoomEventRecord.transaction_id == transaction_id,
+            ))
+            if existing is not None:
+                if existing.event_type != "room.artifact.revised" or existing.content_json != encoded:
+                    raise TransactionConflict()
+                return self._event(existing)
+            head = session.scalar(select(RoomArtifactRevisionRecord).where(
+                RoomArtifactRevisionRecord.room_id == room_id,
+                RoomArtifactRevisionRecord.artifact_id == artifact_id,
+            ).order_by(RoomArtifactRevisionRecord.revision.desc()).limit(1))
+            if (head.revision if head else 0) != base_revision or (head and head.kind != kind):
+                raise ArtifactConflict()
+            room.last_sequence += 1
+            session.add(RoomArtifactRevisionRecord(
+                room_id=room_id, artifact_id=artifact_id, revision=base_revision + 1,
+                kind=kind, title=title, text=text, sequence=room.last_sequence, digest=digest,
+            ))
+            event = RoomEventRecord(
+                room_id=room_id, sequence=room.last_sequence, transaction_id=transaction_id,
+                sender=self._owner(user), event_type="room.artifact.revised", content_json=encoded,
+            )
+            session.add(event)
+            session.flush()
+            return self._event(event)
+
+    def artifact_revision(self, user, room_id, artifact_id, revision):
+        """Read one exact immutable revision, only within the owner's room."""
+        with self._session_factory() as session:
+            self._find(session, user, room_id)
+            record = session.get(RoomArtifactRevisionRecord, (room_id, artifact_id, revision))
+            if record is None:
+                raise RoomNotFound()
+            return {
+                "artifact_id": record.artifact_id, "revision": record.revision,
+                "kind": record.kind, "title": record.title, "text": record.text,
+                "sha256": record.digest, "sequence": record.sequence,
+            }
 
     def timeline(self, user, room_id, after=0, limit=100):
         with self._session_factory() as session:

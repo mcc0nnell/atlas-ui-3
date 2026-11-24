@@ -199,3 +199,18 @@ class RoomParticipantTurnRecord(Base):
     __table_args__ = (
         Index("ix_room_participant_turns_member", "room_id", "member_sequence"),
     )
+
+
+class RoomArtifactRevisionRecord(Base):
+    """Immutable inert artifact content, scoped to a room and revision."""
+
+    __tablename__ = "collaboration_room_artifact_revisions"
+
+    room_id = Column(String(36), primary_key=True)
+    artifact_id = Column(String(36), primary_key=True)
+    revision = Column(Integer, primary_key=True)
+    kind = Column(String(20), nullable=False)
+    title = Column(String(200), nullable=False)
+    text = Column(Text, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    digest = Column(String(64), nullable=False)
