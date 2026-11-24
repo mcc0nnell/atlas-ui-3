@@ -116,3 +116,27 @@ def test_request_contract_without_database():
     assert response.status_code == 422
     response = c.get("/api/rooms/r/events", params={"limit": 201})
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("enabled,history,compliance,expected", [
+    (False, True, False, 404),
+    (True, False, False, 404),
+    (True, True, True, 404),
+    (True, True, False, 200),
+])
+def test_room_feature_gate(monkeypatch, enabled, history, compliance, expected):
+    from atlas.infrastructure.app_factory import app_factory
+
+    settings = app_factory.get_config_manager().app_settings
+    monkeypatch.setattr(settings, "feature_rooms_enabled", enabled)
+    monkeypatch.setattr(settings, "feature_chat_history_enabled", history)
+    monkeypatch.setattr(settings, "feature_compliance_levels_enabled", compliance)
+    monkeypatch.setattr(app_factory, "room_repository", object())
+    if expected == 200:
+        assert room_routes._repo() is app_factory.room_repository
+    else:
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc:
+            room_routes._repo()
+        assert exc.value.status_code == expected

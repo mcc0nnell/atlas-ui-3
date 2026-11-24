@@ -460,6 +460,6 @@ Use `room.agent.added` or `room.agent.removed` with an `agent_id` to record
 roster changes. These are descriptive events, not invitations or execution
 permissions. Retrying the same transaction and payload returns the same event;
 reusing a transaction ID for different content returns HTTP 409. Room IDs are
-scoped to the authenticated owner. This initial API has no UI, automated agent
+scoped to the authenticated owner. The experimental Rooms page supports creation, manual timeline refresh, message submission and roster editing. Rooms are disabled in compliance-enabled deployments until room classification support exists. This initial API has no automated agent
 execution, shared human membership, federation, or room deletion. Do not treat
 roster records as authenticated agent messages.

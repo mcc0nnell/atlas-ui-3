@@ -41,7 +41,7 @@ def _repo():
     from atlas.infrastructure.app_factory import app_factory
 
     settings = app_factory.get_config_manager().app_settings
-    if not (settings.feature_rooms_enabled and settings.feature_chat_history_enabled):
+    if not (settings.feature_rooms_enabled and settings.feature_chat_history_enabled) or settings.feature_compliance_levels_enabled:
         raise HTTPException(404, "Rooms not enabled")
     repo = getattr(app_factory, "room_repository", None)
     if repo is None:
