@@ -214,3 +214,29 @@ class RoomArtifactRevisionRecord(Base):
     text = Column(Text, nullable=False)
     sequence = Column(Integer, nullable=False)
     digest = Column(String(64), nullable=False)
+
+
+class RoomNotebookStateRecord(Base):
+    """One bounded YDoc state per collaborative notebook; checkpoints stay immutable."""
+
+    __tablename__ = "collaboration_room_notebook_states"
+    room_id = Column(String(36), primary_key=True)
+    artifact_id = Column(String(36), primary_key=True)
+    revision = Column(Integer, nullable=False)
+    state = Column(Text, nullable=False)
+
+
+class RoomNotebookRunRecord(Base):
+    """Durable user request for one exact checkpoint, claimed once by a trusted worker."""
+
+    __tablename__ = "collaboration_room_notebook_runs"
+    room_id = Column(String(36), primary_key=True)
+    run_id = Column(String(36), primary_key=True)
+    artifact_id = Column(String(36), nullable=False)
+    revision = Column(Integer, nullable=False)
+    source_sha256 = Column(String(64), nullable=False)
+    state = Column(String(20), nullable=False, default="queued")
+    result_artifact_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)

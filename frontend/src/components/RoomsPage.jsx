@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+
+const LiveNotebook = lazy(() => import('./LiveNotebook'))
 import { Link } from 'react-router-dom'
 import { useChat } from '../contexts/ChatContext'
+import NotebookOutputs from './NotebookOutputs'
+import NotebookRunControl from './NotebookRunControl'
+import { notebookReview, reviewPrompt } from './notebookReview'
 
 const button = 'px-3 py-2 rounded border border-gray-600 hover:bg-gray-700 disabled:opacity-50'
 const input = 'w-full min-w-0 rounded bg-gray-800 border border-gray-600 p-2 text-gray-100'
@@ -23,6 +28,38 @@ function post(path, payload) {
   })
 }
 
+function emptyNotebook() {
+  return { nbformat: 4, nbformat_minor: 5, metadata: {}, cells: [] }
+}
+
+function NotebookEditor({ text, onChange, disabled, onComment, committed }) {
+  let notebook
+  try { notebook = JSON.parse(text) } catch { notebook = null }
+  if (!notebook || !Array.isArray(notebook.cells)) return <p role="alert">Invalid notebook content.</p>
+  const update = cells => onChange(JSON.stringify({ ...notebook, cells }))
+  const add = cell_type => update([...notebook.cells, { id: crypto.randomUUID(), cell_type,
+    metadata: {}, source: '', ...(cell_type === 'code' ? { execution_count: null, outputs: [] } : {}) }])
+  return <div className="space-y-3" aria-label="Notebook cells">
+    {notebook.cells.map((cell, index) => <section key={cell.id} className="border border-gray-600 rounded p-2 space-y-2">
+      <label htmlFor={`notebook-cell-${cell.id}`}>Cell {index + 1} · {cell.cell_type}</label>
+      <textarea id={`notebook-cell-${cell.id}`} className={input} rows={4} disabled={disabled}
+        value={Array.isArray(cell.source) ? cell.source.join('') : cell.source}
+        onChange={e => update(notebook.cells.map(c => c.id === cell.id ? { ...c, source: e.target.value,
+          ...(c.cell_type === 'code' ? { execution_count: null, outputs: [] } : {}) } : c))} />
+      <NotebookOutputs cell={cell} />
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={button} disabled={disabled} onClick={() => update(notebook.cells.filter(c => c.id !== cell.id))}>Remove cell {index + 1}</button>
+        <button type="button" className={button} disabled={disabled || !committed} onClick={() => onComment(cell.id)}>Discuss cell {index + 1}</button>
+      </div>
+    </section>)}
+    <div className="flex flex-wrap gap-2">
+      <button type="button" className={button} disabled={disabled} onClick={() => add('markdown')}>Add Markdown cell</button>
+      <button type="button" className={button} disabled={disabled} onClick={() => add('code')}>Add code cell</button>
+    </div>
+    <p className="text-xs text-gray-400">Cells are saved as standard notebook JSON. This editor does not execute code; saved outputs are untrusted artifact content.</p>
+  </div>
+}
+
 function RoomTimeline({ room, models }) {
   const path = `/api/rooms/${encodeURIComponent(room.id)}/events`
   const [events, setEvents] = useState([])
@@ -34,6 +71,7 @@ function RoomTimeline({ room, models }) {
   const [more, setMore] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [cellReference, setCellReference] = useState(null)
   const [agent, setAgent] = useState('')
   const [participant, setParticipant] = useState('')
   const [model, setModel] = useState('')
@@ -48,10 +86,18 @@ function RoomTimeline({ room, models }) {
   const [artifactKind, setArtifactKind] = useState('document')
   const [artifactText, setArtifactText] = useState('')
   const [artifactLoading, setArtifactLoading] = useState(false)
+  const [liveArtifact, setLiveArtifact] = useState(null)
   const artifactRequest = useRef(0)
+  const [reviewSelection, setReviewSelection] = useState(null)
+  const availableReview = !artifactLoading && artifact && artifactText === artifact.text &&
+    artifactTitle === artifact.title && !liveArtifact ? notebookReview(artifact, events) : null
+  const selectedReview = availableReview && reviewSelection === availableReview.key + ':' + model
+    ? availableReview : null
+  const outgoingPrompt = reviewPrompt(question, selectedReview)
 
   const resetArtifact = () => {
     artifactRequest.current += 1
+    setReviewSelection(null)
     setArtifactLoading(false)
     setArtifact(null)
     setArtifactTitle('')
@@ -61,6 +107,7 @@ function RoomTimeline({ room, models }) {
 
   const viewArtifact = async content => {
     const requestId = ++artifactRequest.current
+    setReviewSelection(null)
     setArtifactLoading(true)
     setError('')
     try {
@@ -83,8 +130,9 @@ function RoomTimeline({ room, models }) {
     setBusy(true)
     try {
       const page = await request(`${path}?after=${cursor.current}&limit=100`)
-      cursor.current = page.next_after
-      setEvents(previous => [...previous, ...page.events])
+      const fresh = page.events.filter(event => event.sequence > cursor.current)
+      cursor.current = Math.max(cursor.current, page.next_after)
+      setEvents(previous => [...previous, ...fresh])
       setMore(page.has_more)
       const roster = await request(path.replace(/\/events$/, '/participants'))
       setParticipants(roster.participants || [])
@@ -96,7 +144,11 @@ function RoomTimeline({ room, models }) {
     }
   }, [path])
 
-  useEffect(() => { sync() }, [sync])
+  useEffect(() => {
+    sync()
+    const timer = window.setInterval(sync, 5000)
+    return () => window.clearInterval(timer)
+  }, [sync])
 
   const append = async event => {
     if (sending.current || loading.current) return
@@ -108,12 +160,15 @@ function RoomTimeline({ room, models }) {
       setPending(payload)
       await post(path, payload)
       setPending(null)
-      if (payload.event.type === 'room.message') setMessage('')
+      if (['room.message', 'room.notebook.comment'].includes(payload.event.type)) { setMessage(''); setCellReference(null) }
       if (payload.event.type === 'room.agent.added') setAgent('')
       if (payload.event.type === 'room.artifact.revised') resetArtifact()
       await sync()
     } catch (err) {
-      if (err.status === 409 && (pending?.event || event).type === 'room.artifact.revised') {
+      if ([404, 422].includes(err.status)) {
+        setPending(null)
+        setError(err.message)
+      } else if (err.status === 409 && (pending?.event || event).type === 'room.artifact.revised') {
         setPending(null)
         setError('Artifact conflict. Refresh and open the latest revision before saving again.')
       } else setError(err.message)
@@ -124,12 +179,12 @@ function RoomTimeline({ room, models }) {
   }
 
   const ask = async () => {
-    if (turnLock.current || loading.current) return
+    if (turnLock.current || loading.current || (!turnPending && !outgoingPrompt)) return
     turnLock.current = true
     setTurnBusy(true)
     setError('')
     const payload = turnPending || {
-      transaction_id: crypto.randomUUID(), agent_id: participant, model, prompt: question.trim(),
+      transaction_id: crypto.randomUUID(), agent_id: participant, model, prompt: outgoingPrompt,
     }
     setTurnPending(payload)
     try {
@@ -137,6 +192,7 @@ function RoomTimeline({ room, models }) {
       if (result.state !== 'pending') {
         setTurnPending(null)
         setQuestion('')
+        setReviewSelection(null)
         if (result.state === 'failed') setError('Agent turn failed. No reply was saved.')
       }
       await sync()
@@ -148,6 +204,8 @@ function RoomTimeline({ room, models }) {
     }
   }
 
+  const newerArtifact = artifact && events.filter(event => event.type === 'room.artifact.revised' &&
+    event.content.artifact_id === artifact.artifact_id && event.content.revision > artifact.revision).at(-1)?.content
   const participantInfo = new Map(participants.map(p => [p.agent_id, p]))
   const roster = new Set()
   for (const event of events) {
@@ -174,8 +232,20 @@ function RoomTimeline({ room, models }) {
                   ? `${event.content.agent_id} · ${event.content.model}` : event.sender} · #{event.sequence}</div>
                 {['room.message', 'room.agent.reply'].includes(event.type) ? (
                   <p className="whitespace-pre-wrap">{event.content.text}</p>
+                ) : event.type === 'room.notebook.comment' ? (
+                  <div>
+                    <p className="whitespace-pre-wrap">{event.content.text}</p>
+                    <button className={button} disabled={!!pending || submitting || artifactLoading}
+                      onClick={() => viewArtifact(event.content)}>Open referenced cell {event.content.cell_id} · revision {event.content.revision}</button>
+                  </div>
                 ) : ['room.agent.added', 'room.agent.removed'].includes(event.type) ? (
                   <p>{event.type === 'room.agent.added' ? 'Added' : 'Removed'} roster entry: {event.content.agent_id}</p>
+                ) : event.type === 'room.notebook.run' ? (
+                  <div>
+                    <p>Notebook run {event.content.state} · input revision {event.content.revision}</p>
+                    {event.content.result_artifact_id && <button className={button} disabled={!!pending || submitting || artifactLoading}
+                      onClick={() => viewArtifact({ artifact_id: event.content.result_artifact_id, revision: 1 })}>Open executed notebook</button>}
+                  </div>
                 ) : event.type === 'room.artifact.revised' ? (
                   <div>
                     <p>{event.content.title} · {event.content.kind} · revision {event.content.revision}</p>
@@ -187,7 +257,9 @@ function RoomTimeline({ room, models }) {
             ))}
           </ol>
           {!events.length && !busy && <p className="text-gray-400">No messages yet.</p>}
-          <form className="mt-4 space-y-2" onSubmit={e => { e.preventDefault(); append({ type: 'room.message', text: message.trim() }) }}>
+          <form className="mt-4 space-y-2" onSubmit={e => { e.preventDefault(); append(cellReference ? { type: 'room.notebook.comment', ...cellReference, text: message.trim() } : { type: 'room.message', text: message.trim() }) }}>
+            {cellReference && <div className="flex flex-wrap gap-2 items-center"><span>Discussing cell {cellReference.cell_id} · revision {cellReference.revision}</span>
+              <button type="button" className={button} disabled={!!pending || submitting} onClick={() => setCellReference(null)}>Clear cell reference</button></div>}
             <label htmlFor="room-message">Message</label>
             <textarea id="room-message" className={input} rows={3} value={message}
               maxLength={16000} disabled={!!pending || submitting} onChange={e => setMessage(e.target.value)} />
@@ -195,9 +267,14 @@ function RoomTimeline({ room, models }) {
           </form>
           <section className="mt-6 border border-gray-700 rounded p-3 space-y-2" aria-label="Room artifacts">
             <h3 className="font-semibold">Artifacts</h3>
-            <p className="text-sm text-gray-400">Save inert documents, workflow definitions, or results. Revisions are immutable; nothing here executes.</p>
+            <p className="text-sm text-gray-400">Save inert documents, notebooks, workflow definitions, or results. Revisions are immutable; nothing here executes.</p>
             <button className={button} disabled={!!pending || submitting} onClick={resetArtifact}>New artifact</button>
             {artifact && <p>Editing revision {artifact.revision}. Saving creates a new revision.</p>}
+            {newerArtifact && <div role="status" className="space-y-2">
+              <p>Revision {newerArtifact.revision} is available. Your current draft is unchanged.</p>
+              <button type="button" className={button} disabled={!!pending || submitting || artifactLoading}
+                onClick={() => { if (artifactText === artifact.text && artifactTitle === artifact.title || window.confirm('Discard local draft and open the latest revision?')) viewArtifact(newerArtifact) }}>Open latest revision</button>
+            </div>}
             <form className="space-y-2" onSubmit={e => {
               e.preventDefault()
               append({ type: 'room.artifact.revised', artifact_id: artifact?.artifact_id || crypto.randomUUID(),
@@ -208,17 +285,40 @@ function RoomTimeline({ room, models }) {
                 disabled={!!pending || submitting || artifactLoading} onChange={e => setArtifactTitle(e.target.value)} />
               <label htmlFor="artifact-kind">Artifact type</label>
               <select id="artifact-kind" className={input} value={artifactKind}
-                disabled={!!artifact || !!pending || submitting || artifactLoading} onChange={e => setArtifactKind(e.target.value)}>
+                disabled={!!artifact || !!pending || submitting || artifactLoading} onChange={e => {
+                  setArtifactKind(e.target.value)
+                  if (e.target.value === 'notebook') setArtifactText(JSON.stringify(emptyNotebook()))
+                  else if (artifactKind === 'notebook') setArtifactText('')
+                }}>
                 <option value="document">Document</option>
                 <option value="workflow">Workflow</option>
                 <option value="result">Result</option>
+                <option value="notebook">Jupyter notebook</option>
               </select>
-              <label htmlFor="artifact-text">Artifact content</label>
-              <textarea id="artifact-text" className={input} rows={6} maxLength={64000} value={artifactText}
-                disabled={!!pending || submitting || artifactLoading} onChange={e => setArtifactText(e.target.value)} />
-              <button className={button} disabled={!artifactTitle.trim() || !!pending || submitting || busy || artifactLoading}>Save artifact revision</button>
+              {artifactKind === 'notebook' ? <NotebookEditor text={artifactText} onChange={setArtifactText}
+                disabled={!!pending || submitting || artifactLoading} committed={!!artifact && artifactText === artifact.text}
+                onComment={cell_id => setCellReference({ artifact_id: artifact.artifact_id, revision: artifact.revision, cell_id })} /> : <>
+                <label htmlFor="artifact-text">Artifact content</label>
+                <textarea id="artifact-text" className={input} rows={6} maxLength={64000} value={artifactText}
+                  disabled={!!pending || submitting || artifactLoading} onChange={e => setArtifactText(e.target.value)} />
+              </>}
+              {artifactKind === 'notebook' && artifact && <button type="button" className={button}
+                disabled={!!liveArtifact || artifactText !== artifact.text || artifactTitle !== artifact.title || artifactLoading}
+                onClick={() => setLiveArtifact(artifact.artifact_id)}>Open live notebook</button>}
+              {artifactKind === 'notebook' && artifact && <a className={button} download="notebook.ipynb"
+                href={`data:application/json;charset=utf-8,${encodeURIComponent(artifact.text)}`}>Download saved notebook</a>}
+              {artifactText.length > 64000 && <p role="alert">Artifact exceeds the 64,000 character limit.</p>}
+              <button className={button} disabled={!artifactTitle.trim() || artifactText.length > 64000 || (artifact && liveArtifact === artifact.artifact_id) || !!pending || submitting || busy || artifactLoading}>Save artifact revision</button>
             </form>
           </section>
+          {artifact?.kind === 'notebook' && artifact.execution_enabled && <NotebookRunControl
+            key={`${artifact.artifact_id}:${artifact.revision}`} roomId={room.id} artifact={artifact} events={events}
+            disabled={!!liveArtifact || artifactText !== artifact.text || artifactTitle !== artifact.title || artifactLoading || busy}
+            onChange={sync} />}
+          {liveArtifact && <Suspense fallback={<p role="status">Loading live notebook…</p>}>
+            <LiveNotebook key={liveArtifact} roomId={room.id} artifactId={liveArtifact}
+              onClose={() => { setLiveArtifact(null); sync() }} onComment={setCellReference} />
+          </Suspense>}
         </div>
         <aside className="border border-gray-700 rounded p-3 space-y-3">
           <h3 className="font-semibold">Agent roster</h3>
@@ -245,6 +345,7 @@ function RoomTimeline({ room, models }) {
             <select id="room-participant" className={input} value={participant} disabled={!!turnPending}
               onChange={e => {
                 const id = e.target.value
+                setReviewSelection(null)
                 setParticipant(id)
                 const remembered = participantInfo.get(id)?.last_model
                 setModel(models.includes(remembered) ? remembered : '')
@@ -254,15 +355,27 @@ function RoomTimeline({ room, models }) {
             </select>
             <label htmlFor="room-model">Model</label>
             <select id="room-model" className={input} value={model} disabled={!!turnPending}
-              onChange={e => setModel(e.target.value)}>
+              onChange={e => { setReviewSelection(null); setModel(e.target.value) }}>
               <option value="">Choose model</option>
               {models.map(name => <option key={name} value={name}>{name}</option>)}
             </select>
             <label htmlFor="room-question">Ask agent</label>
             <textarea id="room-question" className={input} rows={3} maxLength={4000}
               value={question} disabled={!!turnPending} onChange={e => setQuestion(e.target.value)} />
+            {availableReview && <div className="space-y-2">
+              <label className="flex gap-2 items-center">
+                <input type="checkbox" checked={!!selectedReview} disabled={!!turnPending || !model}
+                  onChange={e => setReviewSelection(e.target.checked ? availableReview.key + ':' + model : null)} />
+                Include saved notebook output in this model request
+              </label>
+              {selectedReview && <>
+                <p className="text-xs">The selected model receives the following exact output data and provenance. This request does not execute the notebook. The question and selected data are saved in participant history and may be included in later turns.</p>
+                <pre className="whitespace-pre-wrap break-all text-xs" aria-label="Notebook output sent to model">{selectedReview.data}</pre>
+                {!outgoingPrompt && question.trim() && <p role="alert">Question and notebook output exceed the 4,000 character limit.</p>}
+              </>}
+            </div>}
             <button className={button} disabled={turnBusy || busy || more || (!turnPending &&
-              (!roster.has(participant) || !models.includes(model) || !question.trim()))}>
+              (!roster.has(participant) || !models.includes(model) || !outgoingPrompt))}>
               {turnBusy ? 'Waiting for reply…' : turnPending ? 'Check or retry turn' : 'Request response'}
             </button>
             {turnPending && <p role="status">Turn requested. Checking again will not launch another turn.</p>}

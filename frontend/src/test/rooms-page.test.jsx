@@ -148,3 +148,53 @@ it('saves and opens an inert artifact revision without treating it as a roster c
   expect(screen.getByText('Editing revision 1. Saving creates a new revision.')).toBeInTheDocument()
   expect(screen.queryByText('Removed roster entry: undefined')).not.toBeInTheDocument()
 })
+
+
+it('creates a standard notebook, edits cells, and posts a revision-linked discussion', async () => {
+  const events = []
+  const revisions = new Map()
+  const posts = []
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url === '/api/rooms') return response({ rooms: [{ id: 'a', name: 'Atlas' }] })
+    if (url.endsWith('/participants')) return response({ participants: [] })
+    if (url.includes('/artifacts/')) return response(revisions.get(Number(url.split('/').at(-1))))
+    if (options?.method === 'POST') {
+      const payload = JSON.parse(options.body).event
+      posts.push(payload)
+      if (payload.type === 'room.artifact.revised') {
+        const content = { artifact_id: payload.artifact_id, kind: payload.kind, title: payload.title, revision: payload.base_revision + 1 }
+        revisions.set(content.revision, { ...content, text: payload.text })
+        events.push(event(events.length + 1, payload.type, content))
+      } else events.push(event(events.length + 1, payload.type, payload))
+      return response(events.at(-1))
+    }
+    const after = Number(new URL(url, 'http://localhost').searchParams.get('after'))
+    return response({ events: events.filter(e => e.sequence > after), next_after: events.at(-1)?.sequence || after, has_more: false })
+  }))
+  render(<MemoryRouter><RoomsPage /></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: 'Atlas' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh timeline' })).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('Artifact title'), { target: { value: 'Research' } })
+  fireEvent.change(screen.getByLabelText('Artifact type'), { target: { value: 'notebook' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Add code cell' }))
+  fireEvent.change(screen.getByLabelText('Cell 1 · code'), { target: { value: '10 + 20' } })
+  expect(screen.getByRole('button', { name: 'Discuss cell 1' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Save artifact revision' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Open Research revision 1' }))
+  await waitFor(() => expect(screen.getByLabelText('Cell 1 · code')).toHaveValue('10 + 20'))
+  const notebook = JSON.parse(posts[0].text)
+  expect(notebook).toMatchObject({ nbformat: 4, nbformat_minor: 5, cells: [{ cell_type: 'code', source: '10 + 20', outputs: [], execution_count: null }] })
+  expect(screen.getByRole('link', { name: 'Download saved notebook' })).toHaveAttribute('download', 'notebook.ipynb')
+  fireEvent.click(screen.getByRole('button', { name: 'Discuss cell 1' }))
+  fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Check this' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(await screen.findByText('Check this')).toBeInTheDocument()
+  expect(posts[1]).toMatchObject({ type: 'room.notebook.comment', artifact_id: posts[0].artifact_id, revision: 1, cell_id: notebook.cells[0].id, text: 'Check this' })
+  const second = { ...revisions.get(1), revision: 2, text: JSON.stringify({ ...notebook, cells: [{ ...notebook.cells[0], source: '10 + 20 + 1' }] }) }
+  revisions.set(2, second)
+  events.push(event(3, 'room.artifact.revised', { artifact_id: second.artifact_id, revision: 2, title: 'Research', kind: 'notebook' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh timeline' }))
+  expect(await screen.findByText('Revision 2 is available. Your current draft is unchanged.')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Open latest revision' }))
+  await waitFor(() => expect(screen.getByLabelText('Cell 1 · code')).toHaveValue('10 + 20 + 1'))
+})
