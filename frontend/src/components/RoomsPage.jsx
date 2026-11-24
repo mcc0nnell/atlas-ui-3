@@ -22,6 +22,7 @@ function post(path, payload) {
 function RoomTimeline({ room, models }) {
   const path = `/api/rooms/${encodeURIComponent(room.id)}/events`
   const [events, setEvents] = useState([])
+  const [participants, setParticipants] = useState([])
   const cursor = useRef(0)
   const loading = useRef(false)
   const sending = useRef(false)
@@ -48,6 +49,8 @@ function RoomTimeline({ room, models }) {
       cursor.current = page.next_after
       setEvents(previous => [...previous, ...page.events])
       setMore(page.has_more)
+      const roster = await request(path.replace(/\/events$/, '/participants'))
+      setParticipants(roster.participants || [])
     } catch (err) {
       setError(err.message)
     } finally {
@@ -104,6 +107,7 @@ function RoomTimeline({ room, models }) {
     }
   }
 
+  const participantInfo = new Map(participants.map(p => [p.agent_id, p]))
   const roster = new Set()
   for (const event of events) {
     if (event.type === 'room.agent.added') roster.add(event.content.agent_id)
@@ -146,7 +150,11 @@ function RoomTimeline({ room, models }) {
           <p className="text-xs text-gray-400">Select a roster entry and a model to request a text-only response.{more && ' Load remaining events for the complete roster.'}</p>
           <ul className="space-y-2">
             {[...roster].sort().map(id => <li key={id} className="flex flex-wrap items-center justify-between gap-2">
-              <span className="break-all">{id}</span>
+              <span className="break-all">{id}
+                {participantInfo.has(id) && <span className="block text-xs text-gray-400">
+                  {participantInfo.get(id).context_turns} remembered turns
+                </span>}
+              </span>
               <button className={button} aria-label={`Remove ${id}`} disabled={!!pending || submitting || more || busy}
                 onClick={() => append({ type: 'room.agent.removed', agent_id: id })}>Remove</button>
             </li>)}
@@ -160,7 +168,12 @@ function RoomTimeline({ room, models }) {
           <form className="space-y-2 border-t border-gray-700 pt-3" onSubmit={e => { e.preventDefault(); ask() }}>
             <label htmlFor="room-participant">Participant</label>
             <select id="room-participant" className={input} value={participant} disabled={!!turnPending}
-              onChange={e => setParticipant(e.target.value)}>
+              onChange={e => {
+                const id = e.target.value
+                setParticipant(id)
+                const remembered = participantInfo.get(id)?.last_model
+                setModel(models.includes(remembered) ? remembered : '')
+              }}>
               <option value="">Choose agent</option>
               {[...roster].sort().map(id => <option key={id} value={id}>{id}</option>)}
             </select>

@@ -1,13 +1,14 @@
 """Durable Matrix-inspired rooms. PostgreSQL serializes each room's timeline."""
 
 import json
+import uuid
 from datetime import timedelta
 
 from sqlalchemy import func, select, update
 
 from atlas.core.user_identity import normalize_user_email
 
-from .models import RoomEventRecord, RoomRecord, RoomTurnRecord
+from .models import RoomEventRecord, RoomParticipantTurnRecord, RoomRecord, RoomTurnRecord
 
 
 class RoomNotFound(Exception):
@@ -145,24 +146,101 @@ class RoomRepository:
             if pending is not None:
                 raise RoomBusy()
             encoded = json.dumps({"agent_id": agent_id}, sort_keys=True, separators=(",", ":"))
-            latest = session.scalar(select(RoomEventRecord).where(
-                RoomEventRecord.room_id == room_id,
-                RoomEventRecord.event_type.in_(["room.agent.added", "room.agent.removed"]),
-                RoomEventRecord.content_json == encoded,
-            ).order_by(RoomEventRecord.sequence.desc()).limit(1))
-            if latest is None or latest.event_type != "room.agent.added":
+            membership = self._membership(session, room_id, encoded)
+            if membership is None:
                 raise AgentNotFound()
+            history = self._participant_history(session, room_id, membership)
             rows = session.scalars(select(RoomEventRecord).where(
                 RoomEventRecord.room_id == room_id,
                 RoomEventRecord.event_type.in_(["room.message", "room.agent.reply"]),
             ).order_by(RoomEventRecord.sequence.desc()).limit(20)).all()
-            # Bound input and treat previous room messages as quoted context.
-            context = json.dumps([self._event(row) for row in reversed(rows)], ensure_ascii=False)
+            context = self._bounded_context(
+                [self._event(row) for row in reversed(rows)], 10000)
             record = RoomTurnRecord(room_id=room_id, transaction_id=transaction_id,
                                     agent_id=agent_id, model=model, prompt=prompt)
             session.add(record)
+            session.add(RoomParticipantTurnRecord(
+                room_id=room_id, transaction_id=transaction_id,
+                member_sequence=membership,
+            ))
             session.flush()
-            return self._turn(record), context[-12000:]
+            return self._turn(record), {
+                "room": context, "participant": history,
+                "participant_id": self._participant_id(room_id, membership),
+            }
+
+    @staticmethod
+    def _participant_id(room_id, membership):
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"atlas-room:{room_id}:{membership}"))
+
+    @staticmethod
+    def _membership(session, room_id, encoded):
+        """Repeated adds are idempotent membership; a removal starts a new identity."""
+        rows = session.execute(select(RoomEventRecord.sequence, RoomEventRecord.event_type).where(
+            RoomEventRecord.room_id == room_id,
+            RoomEventRecord.event_type.in_(["room.agent.added", "room.agent.removed"]),
+            RoomEventRecord.content_json == encoded,
+        ).order_by(RoomEventRecord.sequence.desc()))
+        membership = None
+        for sequence, event_type in rows:
+            if event_type == "room.agent.removed":
+                break
+            membership = sequence
+        return membership
+
+    @staticmethod
+    def _bounded_context(items, budget):
+        """Keep complete JSON records; prefer the newest, without broken JSON."""
+        result = []
+        for item in reversed(items):
+            candidate = [item, *result]
+            if len(json.dumps(candidate, ensure_ascii=False)) > budget:
+                # Skip oversized individual records instead of losing all history.
+                continue
+            result = candidate
+        return result
+
+    def _participant_history(self, session, room_id, membership):
+        rows = session.scalars(select(RoomTurnRecord).join(
+            RoomParticipantTurnRecord,
+            (RoomParticipantTurnRecord.room_id == RoomTurnRecord.room_id)
+            & (RoomParticipantTurnRecord.transaction_id == RoomTurnRecord.transaction_id),
+        ).join(
+            RoomEventRecord,
+            (RoomEventRecord.room_id == RoomTurnRecord.room_id)
+            & (RoomEventRecord.transaction_id == "agent-turn:" + RoomTurnRecord.conversation_id),
+        ).where(
+            RoomTurnRecord.room_id == room_id,
+            RoomParticipantTurnRecord.member_sequence == membership,
+            RoomTurnRecord.state == "completed",
+        ).order_by(RoomEventRecord.sequence.desc()).limit(12)).all()
+        return self._bounded_context([
+            {"prompt": row.prompt[-2000:], "reply": (row.reply or "")[-4000:], "model": row.model}
+            for row in reversed(rows)
+        ], 8000)
+
+    def participants(self, user, room_id):
+        """Current identities and saved-turn counts; no private prompt contents."""
+        with self._session_factory() as session:
+            self._find(session, user, room_id, lock=True)
+            rows = session.scalars(select(RoomEventRecord).where(
+                RoomEventRecord.room_id == room_id,
+                RoomEventRecord.event_type.in_(["room.agent.added", "room.agent.removed"]),
+            ).order_by(RoomEventRecord.sequence)).all()
+            active = {}
+            for row in rows:
+                name = json.loads(row.content_json)["agent_id"]
+                if row.event_type == "room.agent.added":
+                    active.setdefault(name, row.sequence)
+                else:
+                    active.pop(name, None)
+            result = []
+            for name, membership in sorted(active.items()):
+                history = self._participant_history(session, room_id, membership)
+                result.append({"agent_id": name, "participant_id": self._participant_id(room_id, membership),
+                               "context_turns": len(history),
+                               "last_model": history[-1]["model"] if history else None})
+            return result
 
     def finish_turn(self, user, room_id, transaction_id, reply=None):
         """Commit status and the server-authored reply atomically."""
@@ -177,12 +255,15 @@ class RoomRepository:
             record.reply = reply
             if reply:
                 room.last_sequence += 1
+                binding = session.get(RoomParticipantTurnRecord, (room_id, transaction_id))
+                identity = self._participant_id(room_id, binding.member_sequence) if binding else None
                 event = RoomEventRecord(
                     room_id=room_id, sequence=room.last_sequence,
                     transaction_id="agent-turn:" + record.conversation_id,
                     sender=self._owner(user), event_type="room.agent.reply",
                     content_json=json.dumps({"agent_id": record.agent_id, "model": record.model,
-                                             "text": reply, "conversation_id": record.conversation_id}),
+                                             "text": reply, "conversation_id": record.conversation_id,
+                                             "participant_id": identity}),
                 )
                 session.add(event)
             session.flush()

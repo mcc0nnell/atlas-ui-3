@@ -105,3 +105,18 @@ it('requests one model-backed roster response and renders its attribution', asyn
   expect(turns).toHaveLength(1)
   expect(turns[0]).toMatchObject({ agent_id: 'Reviewer', model: 'model-a', prompt: 'Review the design' })
 })
+
+it('restores the participant model preference and remembered turn count', async () => {
+  vi.stubGlobal('fetch', vi.fn(async url => {
+    if (url === '/api/rooms') return response({ rooms: [{ id: 'a', name: 'Atlas' }] })
+    if (url.endsWith('/participants')) return response({ participants: [
+      { agent_id: 'Reviewer', participant_id: 'stable-id', context_turns: 3, last_model: 'model-a' },
+    ] })
+    return response(page([event(1, 'room.agent.added', { agent_id: 'Reviewer' })]))
+  }))
+  render(<MemoryRouter><RoomsPage /></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: 'Atlas' }))
+  expect(await screen.findByText('3 remembered turns')).toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('Participant'), { target: { value: 'Reviewer' } })
+  expect(screen.getByLabelText('Model')).toHaveValue('model-a')
+})

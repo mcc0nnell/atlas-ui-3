@@ -85,6 +85,14 @@ def append_event(room_id: RoomId, body: AppendEvent, user: str = Depends(get_cur
         raise HTTPException(409, "Transaction identifier already used") from exc
 
 
+@router.get("/{room_id}/participants")
+def participants(room_id: RoomId, user: str = Depends(get_current_user), repo=Depends(_repo)):
+    try:
+        return {"participants": repo.participants(user, room_id)}
+    except RoomNotFound as exc:
+        raise HTTPException(404, "Room not found") from exc
+
+
 class AgentTurn(ClosedModel):
     transaction_id: TransactionId
     agent_id: Name

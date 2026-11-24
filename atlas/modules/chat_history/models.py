@@ -185,3 +185,17 @@ class RoomTurnRecord(Base):
     reply = Column(Text, nullable=True)
     conversation_id = Column(String(36), nullable=False, default=_uuid_default)
     created_at = Column(DateTime(timezone=True), default=_now_utc, nullable=False)
+
+
+class RoomParticipantTurnRecord(Base):
+    """Bind a turn to an immutable membership generation, not a display name."""
+
+    __tablename__ = "collaboration_room_participant_turns"
+
+    room_id = Column(String(36), primary_key=True)
+    transaction_id = Column(String(100), primary_key=True)
+    member_sequence = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index("ix_room_participant_turns_member", "room_id", "member_sequence"),
+    )

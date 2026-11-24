@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from atlas.core.log_sanitizer import get_current_user
-from atlas.modules.chat_history.models import RoomEventRecord, RoomRecord, RoomTurnRecord
+from atlas.modules.chat_history.models import RoomEventRecord, RoomParticipantTurnRecord, RoomRecord, RoomTurnRecord
 from atlas.modules.chat_history.room_repository import RoomRepository
 from atlas.routes import room_routes
 
@@ -33,6 +33,7 @@ def repositories():
         RoomRecord.__table__.create(a)
         RoomEventRecord.__table__.create(a)
         RoomTurnRecord.__table__.create(a)
+        RoomParticipantTurnRecord.__table__.create(a)
         yield RoomRepository(sessionmaker(bind=a)), RoomRepository(sessionmaker(bind=b))
     finally:
         second.dispose()
@@ -155,7 +156,7 @@ def test_room_agent_turn_reservation_and_reply(repositories):
     a.append(owner, room, "msg", "room.message", {"text": "Earlier context"})
     turn, context = a.reserve_turn(owner, room, "t", "Reviewer", "model", "Discuss")
     assert turn["state"] == "pending"
-    assert "Earlier context" in context
+    assert any(e["content"].get("text") == "Earlier context" for e in context["room"])
     retry, context = b.reserve_turn(owner, room, "t", "Reviewer", "model", "Discuss")
     assert retry == turn
     assert context is None
@@ -197,3 +198,49 @@ def test_expired_turn_is_not_replayed_and_late_reply_is_ignored(repositories):
     result = a.finish_turn(owner, room, "old", "Late reply")
     assert result["state"] == "failed"
     assert [event["type"] for event in a.timeline(owner, room)["events"]] == ["room.agent.added"]
+
+
+def test_persistent_participant_history_is_scoped_and_generation_safe(repositories):
+    a, b = repositories
+    owner = "owner@example.com"
+    room = a.create(owner, "Design")["id"]
+    for name in ("Designer", "Reviewer"):
+        a.append(owner, room, name, "room.agent.added", {"agent_id": name})
+    first, context = a.reserve_turn(owner, room, "one", "Designer", "m1", "private-design-brief")
+    identity = context["participant_id"]
+    assert context["participant"] == []
+    b.finish_turn(owner, room, "one", "shared-design-reply")
+    a.append(owner, room, "duplicate-add", "room.agent.added", {"agent_id": "Designer"})
+    second, context = b.reserve_turn(owner, room, "two", "Designer", "m1", "follow-up")
+    assert context["participant_id"] == identity
+    assert context["participant"] == [
+        {"prompt": "private-design-brief", "reply": "shared-design-reply", "model": "m1"}
+    ]
+    assert second["conversation_id"] != first["conversation_id"]
+    a.finish_turn(owner, room, "two", "follow-up-reply")
+    _, context = b.reserve_turn(owner, room, "three", "Reviewer", "m2", "review")
+    assert context["participant_id"] != identity
+    assert context["participant"] == []
+    assert any(e["content"].get("text") == "shared-design-reply" for e in context["room"])
+    assert "private-design-brief" not in str(context)
+    a.finish_turn(owner, room, "three", "review-reply")
+    roster = b.participants(owner, room)
+    assert roster[0]["participant_id"] == identity
+    assert roster[0]["context_turns"] == 2
+    assert roster[0]["last_model"] == "m1"
+    a.append(owner, room, "leave", "room.agent.removed", {"agent_id": "Designer"})
+    a.append(owner, room, "rejoin", "room.agent.added", {"agent_id": "Designer"})
+    _, context = b.reserve_turn(owner, room, "four", "Designer", "m1", "new membership")
+    assert context["participant_id"] != identity
+    assert context["participant"] == []
+    other_room = a.create(owner, "Other")["id"]
+    a.append(owner, other_room, "join", "room.agent.added", {"agent_id": "Designer"})
+    _, other = b.reserve_turn(owner, other_room, "one", "Designer", "m1", "other room")
+    assert other["participant"] == []
+    assert other["room"] == []
+    assert other["participant_id"] not in {identity, context["participant_id"]}
+
+
+def test_context_budget_preserves_complete_records():
+    items = [{"text": "old"}, {"text": "x" * 500}, {"text": "latest"}]
+    assert RoomRepository._bounded_context(items, 70) == [items[0], items[2]]

@@ -471,9 +471,21 @@ request a single text response. The API is `POST /api/rooms/{room_id}/turns`,
 with `transaction_id`, `agent_id`, `model`, and `prompt`. It invokes the
 native Atlas launcher in a text-only mode (no tools, data sources, or agent
 loop). The user must initiate each turn. The model receives bounded recent
-room context, including prior participants' replies. Each turn has its own
-native conversation; long-lived per-agent native conversation continuation is
-not part of this increment.
+room context, including prior participants' replies, plus the selected
+participant's own recent completed prompts and replies. Each membership
+generation has a durable identity; duplicate additions preserve it, while
+removal and re-addition creates a new identity. The roster endpoint
+`GET /api/rooms/{room_id}/participants` exposes the bounded history count
+and last model, not individual prompt contents.
+
+Each turn still uses a fresh native conversation. Individual history is
+rehydrated from the room's committed turn records, rather than allowing an
+expired invocation or ordinary chat edit to mutate a shared native history.
+Only completed turns linked to a membership by this version enter individual
+history; older replies remain visible in the shared timeline. Up to 12 recent
+completed turns are considered, within an 8,000-character JSON budget;
+shared context is separately bounded. Replies are shared, not private
+messages, and may include information from their input prompts.
 
 A PostgreSQL reservation prevents overlapping room turns and repeated model
 invocations with the same transaction ID. Successful responses become
